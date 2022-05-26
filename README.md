@@ -91,6 +91,7 @@ Here is the Resnet50-FPN YOLACT model (released on April 5th, 2019) along with t
 | 550        | Resnet50-FPN  | 86.3 | 28.7 | [yolact_resnet50_54_800000.pth](https://drive.google.com/file/d/1yp7ZbbDwvMiFJEq4ptVKTYTI2VeRDXl0/view?usp=sharing)  | [Mirror](https://ucdavis365-my.sharepoint.com/:u:/g/personal/yongjaelee_ucdavis_edu/EUVpxoSXaqNIlssoLKOEoCcB1m0RpzGq_Khp5n1VX3zcUw) |
 
 **Note 1:** estimated FPS assumes multi-threading, and does not include pre/post-processing times
+
 **Note 2:** estimated mAP measured using the quantized model evaluated on the host system; mAP of compiled model running on target hardware may be different
 
 To evalute the model, put the corresponding weights file in the `./weights` directory and run one of the following commands. The name of each config is everything before the numbers in the file name (e.g., `yolact_base` for `yolact_base_54_800000.pth`).
