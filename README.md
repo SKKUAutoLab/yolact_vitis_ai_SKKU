@@ -147,11 +147,13 @@ The command above stores the floating-point result in output_image.jpg, and the 
 
  - Copy the compiled model to the target application directory
    ```bash
+   mkdir -p target_app/yolact/model
    cp compiled_yolact_model/yolact.xmodel target_app/yolact/model/.
    ```
 
  - Copy test data from the COCO data set to the target application directory
    ```bash
+   mkdir -p target_app/yolact/data/images
    cp data/coco/images/000000000552.jpg target_app/yolact/data/images/.
    cp data/coco/images/000000103817.jpg target_app/yolact/data/images/.
    cp data/coco/images/000000403834.jpg target_app/yolact/data/images/.
