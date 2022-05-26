@@ -1,4 +1,11 @@
 # -*- coding: utf-8 -*-
+
+###
+### Modifications:
+###  1) Updated to receive prior boxes as an input rather than attached to the model predictions
+###  2) Updated to recieve prediction data that has not been concatenated
+###
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -47,7 +54,7 @@ class MultiBoxLoss(nn.Module):
             self.class_instances = None
             self.total_instances = 0
 
-    def forward(self, net, predictions, targets, masks, num_crowds):
+    def forward(self, net, predictions, priors, targets, masks, num_crowds):
         """Multibox Loss
         Args:
             predictions (tuple): A tuple containing loc preds, conf preds,
@@ -70,10 +77,9 @@ class MultiBoxLoss(nn.Module):
             * Only if mask_type == lincomb
         """
 
-        loc_data  = predictions['loc']
-        conf_data = predictions['conf']
-        mask_data = predictions['mask']
-        priors    = predictions['priors']
+        loc_data  = torch.cat(predictions['loc'], -2)
+        conf_data = torch.cat(predictions['conf'], -2)
+        mask_data = torch.cat(predictions['mask'], -2)
 
         if cfg.mask_type == mask_type.lincomb:
             proto_data = predictions['proto']

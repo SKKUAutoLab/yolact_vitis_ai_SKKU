@@ -1,8 +1,23 @@
+### 
+### Modifications:
+###   Note - these modifications have only been tested with the yolact_resnet50_config
+###   1) Added detection as part of post-processing rather than part of the model
+###   2) Added Vitis-AI quantizer library
+###   3) Updated supported arguments for quantize calibration & test
+###   4) Updated to create prior boxes instead of doing it as part of the model
+###   5) Updated evalimage function to receive prior boxes as an input, and updated to 
+###      support processing quantized model data.  Updated evalimage to save quantized
+###      image output with _quant suffix
+###   6) Added Vitis-AI quantizer calls
+###
+
+
 from data import COCODetection, get_label_map, MEANS, COLORS
 from yolact import Yolact
 from utils.augmentations import BaseTransform, FastBaseTransform, Resize
 from utils.functions import MovingAverage, ProgressBar
 from layers.box_utils import jaccard, center_size, mask_iou
+from layers import Detect
 from utils import timer
 from utils.functions import SavePath
 from layers.output_utils import postprocess, undo_image_transformation
@@ -11,6 +26,8 @@ import pycocotools
 from data import cfg, set_cfg, set_dataset
 
 import numpy as np
+import pandas as pd
+from math import sqrt
 import torch
 import torch.backends.cudnn as cudnn
 from torch.autograd import Variable
@@ -28,6 +45,8 @@ from PIL import Image
 
 import matplotlib.pyplot as plt
 import cv2
+
+from pytorch_nndct.apis import torch_quantizer, dump_xmodel
 
 def str2bool(v):
     if v.lower() in ('yes', 'true', 't', 'y', '1'):
@@ -113,6 +132,10 @@ def parse_args(argv=None):
                         help='When displaying / saving video, draw the FPS on the frame')
     parser.add_argument('--emulate_playback', default=False, dest='emulate_playback', action='store_true',
                         help='When saving a video, emulate the framerate that you\'d get running in real-time mode.')
+    parser.add_argument('--quantize_calibrate', default=False, action='store_true',
+                        help='Add this flag to perform Vitis-AI quantize calibration.')
+    parser.add_argument('--quantize_test', default=False, action='store_true',
+                        help='Add this flag to perform Vitis-AI quantized testing.')    
 
     parser.set_defaults(no_bar=False, display=False, resume=False, output_coco_json=False, output_web_json=False, shuffle=False,
                         benchmark=False, no_sort=False, no_hash=False, mask_proto_debug=False, crop=True, detect=False, display_fps=False,
@@ -131,6 +154,43 @@ iou_thresholds = [x / 100 for x in range(50, 100, 5)]
 coco_cats = {} # Call prep_coco_cats to fill this
 coco_cats_inv = {}
 color_cache = defaultdict(lambda: {})
+
+def make_priors():
+    """ Note that priors are [x,y,width,height] where (x,y) is the center of the box. """
+    
+    fmap_dims     = { 'conv1': 69, 'conv2': 35, 'conv3': 18, 'conv4': 9, 'conv5': 5}
+    scales        = { 'conv1': 24, 'conv2': 48, 'conv3': 96, 'conv4': 192, 'conv5': 384}
+    aspect_ratios = { 'conv1': [1, 0.5, 2], 'conv2': [1, 0.5, 2], 'conv3': [1, 0.5, 2], 'conv4': [1, 0.5, 2], 'conv5': [1, 0.5, 2]}
+    
+    prior_boxes = []
+
+    for k, fmap in enumerate(list(fmap_dims.keys())):
+        for j in range(fmap_dims[fmap]):
+            for i in range(fmap_dims[fmap]):
+                # +0.5 because priors are in center-size notation
+                x = (i + 0.5) / fmap_dims[fmap]
+                y = (j + 0.5) / fmap_dims[fmap]
+
+                for ar in aspect_ratios[fmap]:
+                    scale = scales[fmap]
+                    if not cfg.backbone.preapply_sqrt:
+                      ar = sqrt(ar)
+
+                    if cfg.backbone.use_pixel_scales:
+                        w = scale * ar / cfg.max_size
+                        h = scale / ar / cfg.max_size
+                    else:
+                        w = scale * ar / conv_w
+                        h = scale / ar / conv_h
+
+                    # This is for backward compatability with a bug where I made everything square by accident
+                    if cfg.backbone.use_square_anchors:
+                        h = w
+
+                    prior_boxes += [x, y, w, h]
+
+    return torch.Tensor(prior_boxes).view(-1, 4)
+
 
 def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, mask_alpha=0.45, fps_str=''):
     """
@@ -592,10 +652,13 @@ def badhash(x):
     x =  ((x >> 16) ^ x) & 0xFFFFFFFF
     return x
 
-def evalimage(net:Yolact, path:str, save_path:str=None):
+def evalimage(net:Yolact, priors, path:str, save_path:str=None, is_quant=False):
     frame = torch.from_numpy(cv2.imread(path)).cuda().float()
     batch = FastBaseTransform()(frame.unsqueeze(0))
     preds = net(batch)
+    detect = Detect(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k,
+                    conf_thresh=cfg.nms_conf_thresh, nms_thresh=cfg.nms_thresh)    
+    preds = detect(preds, priors, is_quant)
 
     img_numpy = prep_display(preds, frame, None, None, undo_transform=False)
     
@@ -607,9 +670,12 @@ def evalimage(net:Yolact, path:str, save_path:str=None):
         plt.title(path)
         plt.show()
     else:
+        if is_quant:
+            out_img, img_ext = save_path.split('.')
+            save_path = out_img + '_quant.' + img_ext
         cv2.imwrite(save_path, img_numpy)
 
-def evalimages(net:Yolact, input_folder:str, output_folder:str):
+def evalimages(net:Yolact, priors, input_folder:str, output_folder:str, is_quant=False):
     if not os.path.exists(output_folder):
         os.mkdir(output_folder)
 
@@ -620,7 +686,7 @@ def evalimages(net:Yolact, input_folder:str, output_folder:str):
         name = '.'.join(name.split('.')[:-1]) + '.png'
         out_path = os.path.join(output_folder, name)
 
-        evalimage(net, path, out_path)
+        evalimage(net, priors, path, out_path, is_quant)
         print(path + ' -> ' + out_path)
     print('Done.')
 
@@ -867,22 +933,25 @@ def evalvideo(net:Yolact, path:str, out_path:str=None):
     
     cleanup_and_exit()
 
-def evaluate(net:Yolact, dataset, train_mode=False):
-    net.detect.use_fast_nms = args.fast_nms
-    net.detect.use_cross_class_nms = args.cross_class_nms
+def evaluate(net:Yolact, priors, dataset, train_mode=False, is_quant=False, quant_mode="calib"):
+    detect = Detect(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k,
+                    conf_thresh=cfg.nms_conf_thresh, nms_thresh=cfg.nms_thresh)
+
+    detect.use_fast_nms = args.fast_nms
+    detect.use_cross_class_nms = args.cross_class_nms
     cfg.mask_proto_debug = args.mask_proto_debug
 
     # TODO Currently we do not support Fast Mask Re-scroing in evalimage, evalimages, and evalvideo
     if args.image is not None:
         if ':' in args.image:
             inp, out = args.image.split(':')
-            evalimage(net, inp, out)
+            evalimage(net, priors, inp, out, is_quant)
         else:
-            evalimage(net, args.image)
+            evalimage(net, priors, args.image, is_quant=is_quant)
         return
     elif args.images is not None:
         inp, out = args.images.split(':')
-        evalimages(net, inp, out)
+        evalimages(net, priors, inp, out, is_quant)
         return
     elif args.video is not None:
         if ':' in args.video:
@@ -947,6 +1016,7 @@ def evaluate(net:Yolact, dataset, train_mode=False):
 
             with timer.env('Network Extra'):
                 preds = net(batch)
+                preds = detect(preds, priors, is_quant)
             # Perform the meat of the operation here depending on our mode.
             if args.display:
                 img_numpy = prep_display(preds, img, h, w)
@@ -990,7 +1060,11 @@ def evaluate(net:Yolact, dataset, train_mode=False):
                     with open(args.ap_data_file, 'wb') as f:
                         pickle.dump(ap_data, f)
 
+                if is_quant and quant_mode is "calib":
+                    return
+
                 return calc_map(ap_data)
+
         elif args.benchmark:
             print()
             print()
@@ -1099,9 +1173,39 @@ if __name__ == '__main__':
         net.eval()
         print(' Done.')
 
+        print('Creating prior boxes...', end='')
+        priors = make_priors()
+        print(' Done.')
+
         if args.cuda:
-            net = net.cuda()
+            device = torch.device('cuda:0')
+        else:
+            device = torch.device('cpu')
+        
+        net.to(device)
+       
+        if args.quantize_calibrate:
+            # Perform quantize calibration on the floating-point model
+            print('Quantizing model')
+            cal_data = torch.randn(1, 3, 550, 550)
+            cal_data = cal_data.to(device)
+            quantizer = torch_quantizer("calib", net, (cal_data), output_dir="quant_out", device=device)
+            quant_model = quantizer.quant_model
+            evaluate(quant_model, priors, dataset, is_quant=True)
+            quantizer.export_quant_config()
+        elif args.quantize_test:
+            if args.image is not None:
+                evaluate(net, priors, dataset)
 
-        evaluate(net, dataset)
-
+            # Evaluate the quantized model
+            print('Testing quantized model')
+            cal_data = torch.randn(1, 3, 550, 550)
+            cal_data = cal_data.to(device)
+            quantizer = torch_quantizer("test", net, (cal_data), output_dir="quant_out", device=device)
+            quant_model = quantizer.quant_model
+            evaluate(quant_model, priors, dataset, is_quant=True, quant_mode="test")
+            quantizer.export_xmodel(deploy_check=False, output_dir="quant_out")
+        else:   
+            print('Evaluating floating-point model')
+            evaluate(net, priors, dataset)
 

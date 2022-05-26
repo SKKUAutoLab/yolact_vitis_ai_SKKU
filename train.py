@@ -1,3 +1,9 @@
+
+###
+### Modifications:
+###   1) Updated to create prior boxes here instead of in the model definition
+###
+
 from data import *
 from utils.augmentations import SSDAugmentation, BaseTransform
 from utils.functions import MovingAverage, SavePath
@@ -129,21 +135,59 @@ if torch.cuda.is_available():
 else:
     torch.set_default_tensor_type('torch.FloatTensor')
 
+def make_priors():
+    """ Note that priors are [x,y,width,height] where (x,y) is the center of the box. """
+
+    fmap_dims     = { 'conv1': 69, 'conv2': 35, 'conv3': 18, 'conv4': 9, 'conv5': 5}
+    scales        = { 'conv1': 24, 'conv2': 48, 'conv3': 96, 'conv4': 192, 'conv5': 384}
+    aspect_ratios = { 'conv1': [1, 0.5, 2], 'conv2': [1, 0.5, 2], 'conv3': [1, 0.5, 2], 'conv4': [1, 0.5, 2], 'conv5': [1, 0.5, 2]}
+
+    prior_boxes = []
+
+    for k, fmap in enumerate(list(fmap_dims.keys())):
+        for j in range(fmap_dims[fmap]):
+            for i in range(fmap_dims[fmap]):
+                # +0.5 because priors are in center-size notation
+                x = (i + 0.5) / fmap_dims[fmap]
+                y = (j + 0.5) / fmap_dims[fmap]
+
+                for ar in aspect_ratios[fmap]:
+                    scale = scales[fmap]
+                    if not cfg.backbone.preapply_sqrt:
+                      ar = sqrt(ar)
+
+                    if cfg.backbone.use_pixel_scales:
+                        w = scale * ar / cfg.max_size
+                        h = scale / ar / cfg.max_size
+                    else:
+                        w = scale * ar / conv_w
+                        h = scale / ar / conv_h
+
+                    # This is for backward compatability with a bug where I made everything square by accident
+                    if cfg.backbone.use_square_anchors:
+                        h = w
+
+                    prior_boxes += [x, y, w, h]
+
+    return torch.Tensor(prior_boxes).view(-1, 4)
+
+
 class NetLoss(nn.Module):
     """
     A wrapper for running the network and computing the loss
     This is so we can more efficiently use DataParallel.
     """
     
-    def __init__(self, net:Yolact, criterion:MultiBoxLoss):
+    def __init__(self, net:Yolact, criterion:MultiBoxLoss, priors):
         super().__init__()
 
         self.net = net
         self.criterion = criterion
+        self.priors = priors
     
     def forward(self, images, targets, masks, num_crowds):
         preds = self.net(images)
-        losses = self.criterion(self.net, preds, targets, masks, num_crowds)
+        losses = self.criterion(self.net, preds, self.priors, targets, masks, num_crowds)
         return losses
 
 class CustomDataParallel(nn.DataParallel):
@@ -219,13 +263,15 @@ def train():
                              neg_threshold=cfg.negative_iou_threshold,
                              negpos_ratio=cfg.ohem_negpos_ratio)
 
+    priors = make_priors()
+
     if args.batch_alloc is not None:
         args.batch_alloc = [int(x) for x in args.batch_alloc.split(',')]
         if sum(args.batch_alloc) != args.batch_size:
             print('Error: Batch allocation (%s) does not sum to batch size (%s).' % (args.batch_alloc, args.batch_size))
             exit(-1)
 
-    net = CustomDataParallel(NetLoss(net, criterion))
+    net = CustomDataParallel(NetLoss(net, criterion, priors))
     if args.cuda:
         net = net.cuda()
     
@@ -368,10 +414,10 @@ def train():
             # This is done per epoch
             if args.validation_epoch > 0:
                 if epoch % args.validation_epoch == 0 and epoch > 0:
-                    compute_validation_map(epoch, iteration, yolact_net, val_dataset, log if args.log else None)
+                    compute_validation_map(epoch, iteration, yolact_net, priors, val_dataset, log if args.log else None)
         
         # Compute validation mAP after training is finished
-        compute_validation_map(epoch, iteration, yolact_net, val_dataset, log if args.log else None)
+        compute_validation_map(epoch, iteration, yolact_net, priors, val_dataset, log if args.log else None)
     except KeyboardInterrupt:
         if args.interrupt:
             print('Stopping early. Saving network...')
@@ -482,14 +528,14 @@ def compute_validation_loss(net, data_loader, criterion):
         loss_labels = sum([[k, losses[k]] for k in loss_types if k in losses], [])
         print(('Validation ||' + (' %s: %.3f |' * len(losses)) + ')') % tuple(loss_labels), flush=True)
 
-def compute_validation_map(epoch, iteration, yolact_net, dataset, log:Log=None):
+def compute_validation_map(epoch, iteration, yolact_net, priors, dataset, log:Log=None):
     with torch.no_grad():
         yolact_net.eval()
         
         start = time.time()
         print()
         print("Computing validation mAP (this may take a while)...", flush=True)
-        val_info = eval_script.evaluate(yolact_net, dataset, train_mode=True)
+        val_info = eval_script.evaluate(yolact_net, priors, dataset, train_mode=True)
         end = time.time()
 
         if log is not None:

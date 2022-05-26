@@ -1,5 +1,9 @@
 """ Contains functions used to sanitize and prepare the output of Yolact. """
 
+### 
+### Modifications:
+###   1) Removed unused net variable
+###
 
 import torch
 import torch.nn as nn
@@ -33,7 +37,7 @@ def postprocess(det_output, w, h, batch_idx=0, interpolation_mode='bilinear',
     """
     
     dets = det_output[batch_idx]
-    net = dets['net']
+    #net = dets['net']
     dets = dets['detection']
 
     if dets is None:

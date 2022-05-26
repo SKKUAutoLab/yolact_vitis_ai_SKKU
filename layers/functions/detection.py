@@ -1,3 +1,12 @@
+###
+### Modifications:
+###   1) Update to add prior boxes (priors) as an input
+###   2) Update to support receiving data that has not been concatenated at the yolact model output
+###   3) Add is_quant input to indicate if we are processing the output from the floating-point 
+###      model or the quantized model - the output with the float model is in the form of a list, but
+###      the quantized model is an array of tensors
+###
+
 import torch
 import torch.nn.functional as F
 from ..box_utils import decode, jaccard, index2d
@@ -6,6 +15,8 @@ from utils import timer
 from data import cfg, mask_type
 
 import numpy as np
+import pandas as pd
+from PIL import Image
 
 
 class Detect(object):
@@ -29,7 +40,7 @@ class Detect(object):
         self.use_cross_class_nms = False
         self.use_fast_nms = False
 
-    def __call__(self, predictions, net):
+    def __call__(self, predictions, priors, is_quant=False):
         """
         Args:
              loc_data: (tensor) Loc preds from loc layers
@@ -50,13 +61,22 @@ class Detect(object):
             Note that the outputs are sorted only if cross_class_nms is False
         """
 
-        loc_data   = predictions['loc']
-        conf_data  = predictions['conf']
-        mask_data  = predictions['mask']
-        prior_data = predictions['priors']
+        if is_quant:
+            loc_data   = torch.cat(predictions[0:5], -2)
+            conf_data  = torch.cat(predictions[5:10], -2)
+            mask_data  = torch.cat(predictions[10:15], -2)
+            prior_data = priors
+            proto_data = predictions[15]
+            inst_data  = None 
+ 
+        else:
+            loc_data   = torch.cat(predictions['loc'], -2)
+            conf_data  = torch.cat(predictions['conf'], -2)
+            mask_data  = torch.cat(predictions['mask'], -2)
+            prior_data = priors
 
-        proto_data = predictions['proto'] if 'proto' in predictions else None
-        inst_data  = predictions['inst']  if 'inst'  in predictions else None
+            proto_data = predictions['proto'] if 'proto' in predictions else None
+            inst_data  = predictions['inst']  if 'inst'  in predictions else None
 
         out = []
 
@@ -73,7 +93,7 @@ class Detect(object):
                 if result is not None and proto_data is not None:
                     result['proto'] = proto_data[batch_idx]
 
-                out.append({'detection': result, 'net': net})
+                out.append({'detection': result})
         
         return out
 

@@ -1,3 +1,20 @@
+###
+### Modifications:
+###   Note - these modifications have only been tested with the yolact_resnet50_config
+###   1) Permanently Turn of JIT to support Vitis-AI quantization tools
+###   2) In the PredictionModule removed prior boxes (from network graph) and related code.  
+###      Prior box computation moved to eval.py
+###   3) In FPN network rewrite code to remove element-wise add with 0 valued constant
+###   4) In the FPN network convert non-integer scale factor bilinear interpolation 
+###      operations with bilinear interpolation by integer scale factor
+###   5) Removed unsupported torch.cat() operations from the network outputs
+###   6) In the Prototype network (modification made in utils/functions.py) converted the 
+###      ReLU that followed the bilinear interpolation operation to torch.nn.Identity().  
+###      The ReLU following the interpolation layer was preventing the Vitis-AI compiler from 
+###      mapping the interpolation operation to the DPU
+###   7) Remove detection code from the model & move to eval.py as a post-processing function
+###
+
 import torch, torchvision
 import torch.nn as nn
 import torch.nn.functional as F
@@ -22,9 +39,10 @@ from utils.functions import MovingAverage, make_net
 torch.cuda.current_device()
 
 # As of March 10, 2019, Pytorch DataParallel still doesn't support JIT Script Modules
-use_jit = torch.cuda.device_count() <= 1
+# TJS - Force JIT off to be compatible with Vitis-AI tools
+use_jit = False
 if not use_jit:
-    print('Multiple GPUs detected! Turning off JIT.')
+    print('Turning off JIT.')
 
 ScriptModuleWrapper = torch.jit.ScriptModule if use_jit else nn.Module
 script_method_wrapper = torch.jit.script_method if use_jit else lambda fn, _rcn=None: fn
@@ -123,13 +141,6 @@ class PredictionModule(nn.Module):
             if cfg.mask_type == mask_type.lincomb and cfg.mask_proto_coeff_gate:
                 self.gate_layer = nn.Conv2d(out_channels, self.num_priors * self.mask_dim, kernel_size=3, padding=1)
 
-        self.aspect_ratios = aspect_ratios
-        self.scales = scales
-
-        self.priors = None
-        self.last_conv_size = None
-        self.last_img_size = None
-
     def forward(self, x):
         """
         Args:
@@ -199,9 +210,7 @@ class PredictionModule(nn.Module):
         if cfg.mask_proto_split_prototypes_by_head and cfg.mask_type == mask_type.lincomb:
             mask = F.pad(mask, (self.index * self.mask_dim, (self.num_heads - self.index - 1) * self.mask_dim), mode='constant', value=0)
         
-        priors = self.make_priors(conv_h, conv_w, x.device)
-
-        preds = { 'loc': bbox, 'conf': conf, 'mask': mask, 'priors': priors }
+        preds = { 'loc': bbox, 'conf': conf, 'mask': mask }
 
         if cfg.use_mask_scoring:
             preds['score'] = score
@@ -210,57 +219,7 @@ class PredictionModule(nn.Module):
             preds['inst'] = inst
         
         return preds
-
-    def make_priors(self, conv_h, conv_w, device):
-        """ Note that priors are [x,y,width,height] where (x,y) is the center of the box. """
-        global prior_cache
-        size = (conv_h, conv_w)
-
-        with timer.env('makepriors'):
-            if self.last_img_size != (cfg._tmp_img_w, cfg._tmp_img_h):
-                prior_data = []
-
-                # Iteration order is important (it has to sync up with the convout)
-                for j, i in product(range(conv_h), range(conv_w)):
-                    # +0.5 because priors are in center-size notation
-                    x = (i + 0.5) / conv_w
-                    y = (j + 0.5) / conv_h
-                    
-                    for ars in self.aspect_ratios:
-                        for scale in self.scales:
-                            for ar in ars:
-                                if not cfg.backbone.preapply_sqrt:
-                                    ar = sqrt(ar)
-
-                                if cfg.backbone.use_pixel_scales:
-                                    w = scale * ar / cfg.max_size
-                                    h = scale / ar / cfg.max_size
-                                else:
-                                    w = scale * ar / conv_w
-                                    h = scale / ar / conv_h
-                                
-                                # This is for backward compatability with a bug where I made everything square by accident
-                                if cfg.backbone.use_square_anchors:
-                                    h = w
-
-                                prior_data += [x, y, w, h]
-
-                self.priors = torch.Tensor(prior_data, device=device).view(-1, 4).detach()
-                self.priors.requires_grad = False
-                self.last_img_size = (cfg._tmp_img_w, cfg._tmp_img_h)
-                self.last_conv_size = (conv_w, conv_h)
-                prior_cache[size] = None
-            elif self.priors.device != device:
-                # This whole weird situation is so that DataParalell doesn't copy the priors each iteration
-                if prior_cache[size] is None:
-                    prior_cache[size] = {}
-                
-                if device not in prior_cache[size]:
-                    prior_cache[size][device] = self.priors.to(device)
-
-                self.priors = prior_cache[size][device]
         
-        return self.priors
 
 class FPN(ScriptModuleWrapper):
     """
@@ -326,12 +285,27 @@ class FPN(ScriptModuleWrapper):
         j = len(convouts)
         for lat_layer in self.lat_layers:
             j -= 1
-
+            
+            # TJS - modified this section of code to remove unnecessary element-wise add with constant 0,
+            #       and convert interpolate option to use scale factor of 2 instead of non-integer value.
+            #       The actual scale factors needed for the ResNet-50 backbone are 35/18 = 1.944, and 
+            #       69/35 = 1.971.  However, the Xilinx DPU only supports bilinear interpolation when
+            #       using scale factors of 2, 4, or 8.  Therefore, we first upsample by a factor of 2,
+            #       and then downsample using average pooling with stride=1 to get the desired output size.  
+            #       Example:
+            #          input size                  = 18x18
+            #          interpolate output size     = 36x36
+            #          average pooling output size = 35x35
+            #          output size                 = 35x35
             if j < len(convouts) - 1:
                 _, _, h, w = convouts[j].size()
-                x = F.interpolate(x, size=(h, w), mode=self.interpolation_mode, align_corners=False)
+                x = F.interpolate(x, scale_factor=2, mode=self.interpolation_mode, align_corners=False)
+                x = F.avg_pool2d(x, 2, stride=1, padding=0)
+                y = lat_layer(convouts[j])
+                x = x + y
+            else:
+                x = lat_layer(convouts[j])
             
-            x = x + lat_layer(convouts[j])
             out[j] = x
         
         # This janky second loop is here because TorchScript.
@@ -465,10 +439,6 @@ class Yolact(nn.Module):
         
         if cfg.use_semantic_segmentation_loss:
             self.semantic_seg_conv = nn.Conv2d(src_channels[0], cfg.num_classes-1, kernel_size=1)
-
-        # For use in evaluation
-        self.detect = Detect(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k,
-            conf_thresh=cfg.nms_conf_thresh, nms_thresh=cfg.nms_thresh)
 
     def save_weights(self, path):
         """ Saves the model's weights using compression because the file sizes were getting too big. """
@@ -605,7 +575,7 @@ class Yolact(nn.Module):
 
 
         with timer.env('pred_heads'):
-            pred_outs = { 'loc': [], 'conf': [], 'mask': [], 'priors': [] }
+            pred_outs = { 'loc': [], 'conf': [], 'mask': [] }
 
             if cfg.use_mask_scoring:
                 pred_outs['score'] = []
@@ -630,8 +600,6 @@ class Yolact(nn.Module):
                 for k, v in p.items():
                     pred_outs[k].append(v)
 
-        for k, v in pred_outs.items():
-            pred_outs[k] = torch.cat(v, -2)
 
         if proto_out is not None:
             pred_outs['proto'] = proto_out
@@ -644,7 +612,6 @@ class Yolact(nn.Module):
             if cfg.use_semantic_segmentation_loss:
                 pred_outs['segm'] = self.semantic_seg_conv(outs[0])
 
-            return pred_outs
         else:
             if cfg.use_mask_scoring:
                 pred_outs['score'] = torch.sigmoid(pred_outs['score'])
@@ -671,9 +638,11 @@ class Yolact(nn.Module):
                         * F.softmax(pred_outs['conf'][:, :, 1:], dim=-1)
                     
                 else:
-                    pred_outs['conf'] = F.softmax(pred_outs['conf'], -1)
-
-            return self.detect(pred_outs, self)
+                    for k in range(len(pred_outs['conf'])):
+                        pred_outs['conf'][k] = F.softmax(pred_outs['conf'][k], dim=-1)
+        
+        
+        return pred_outs
 
 
 
@@ -699,9 +668,6 @@ if __name__ == '__main__':
 
     x = torch.zeros((1, 3, cfg.max_size, cfg.max_size))
     y = net(x)
-
-    for p in net.prediction_layers:
-        print(p.last_conv_size)
 
     print()
     for k, a in y.items():
