@@ -94,7 +94,7 @@ Here is the Resnet50-FPN YOLACT model (released on April 5th, 2019) along with t
 
 **Note 2:** estimated mAP measured using the quantized model evaluated on the host system; mAP of compiled model running on target hardware may be different
 
-To evalute the model, put the corresponding weights file in the `./weights` directory and run one of the following commands. The name of each config is everything before the numbers in the file name (e.g., `yolact_base` for `yolact_base_54_800000.pth`).
+To evalute the model, put the corresponding weights file in the `./weights` directory and run one of the following commands. The name of each config is everything before the numbers in the file name (e.g., `yolact_resnet50` for `yolact_resnet50_54_800000.pth`).
 
 ## Quantitative Results on COCO
 ```bash
