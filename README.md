@@ -1,4 +1,4 @@
-## **This fork has been updated to work with Vitis-AI tools**
+## **This fork has been updated to work with Vitis-AI v2.0 tools**
 
 ### High-level list of updates:
 - Prior box cacluation has been removed from yolact.py
