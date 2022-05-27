@@ -36,7 +36,6 @@ Some examples using the YOLACT base model (Processed using AMD/Xilinx VCK190 dev
 ![Example 1](data/result_0.jpg)
 ![Example 2](data/result_1.jpg)
 ![Example 3](data/result_2.jpg)
-![Example 4](data/result_3.jpg)
 
 # Installation
  - Clone the Vitis-AI repository
