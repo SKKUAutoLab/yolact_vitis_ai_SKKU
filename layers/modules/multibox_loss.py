@@ -77,9 +77,9 @@ class MultiBoxLoss(nn.Module):
             * Only if mask_type == lincomb
         """
 
-        loc_data  = torch.cat(predictions['loc'], -2)
-        conf_data = torch.cat(predictions['conf'], -2)
-        mask_data = torch.cat(predictions['mask'], -2)
+        loc_data  = predictions['loc']
+        conf_data = predictions['conf']
+        mask_data = predictions['mask']
 
         if cfg.mask_type == mask_type.lincomb:
             proto_data = predictions['proto']

@@ -39,22 +39,23 @@
 #include <vitis/ai/nnpp/apply_nms.hpp>
 
 // Timer class
-#include <lnx_time.hpp>
+#include "lnx_time.hpp"
 #include "coco_labels.hpp"
 
 // Model constants
 #define PROTO_HW    (138)
 #define PROTO_C     (32)
+#define PROTO_SIZE  (PROTO_HW*PROTO_HW*PROTO_C)
 #define NUM_PRIORS  (19248)
 
 // COCO dataset classes
 #define NUM_CLASSES (81)
 
 // Detection constants
-#define NMS_CONF_THRESH (0.6f)
-#define NMS_THRESH      (0.2f)
+#define NMS_CONF_THRESH (0.05f)
+#define NMS_THRESH      (0.5f)
 #define NMS_TOP_K       (200)
-#define KEEP_TOP_K      (15)
+#define KEEP_TOP_K      (5)
 
 // Overlay constants
 #define MASK_ALPHA (0.45f)
@@ -76,13 +77,14 @@ class yolact
 
     ~yolact()
     {
+      free(proto_data);
+      free(loc_data);
       free(conf_data);
       free(mask_data);
       free(prior_data);
-      free(loc_data);
     }
 
-    void create( std::string xmodel )
+    int create( std::string xmodel )
     {
       /* Create the graph runner */
       graph  = xir::Graph::deserialize(xmodel);
@@ -92,77 +94,109 @@ class yolact
 
       /* Determine batch size */
       auto input_tensor_buffer = runner->get_inputs();
-      int batch = input_tensor_buffer[0]->get_tensor()->get_shape().at(0);
+      batch_size = input_tensor_buffer[0]->get_tensor()->get_shape().at(0);
 
       /* Allocate prototype output buffers */
-      proto_data = (float *)malloc(sizeof(float)*609408*batch); // 138x138x32
+      proto_data = (float *)malloc(sizeof(float)*PROTO_SIZE*batch_size); // 138x138x32
+      check_alloc(proto_data, "Prototype data");
 
       /* Allocate location data output buffer */
-      loc_data = (float *)malloc(sizeof(float)*NUM_PRIORS*4*batch);
+      loc_data = (float *)malloc(sizeof(float)*NUM_PRIORS*4*batch_size);
+      check_alloc(loc_data, "Location data");
 
       /* Allocate confidence data output buffers */
-      conf_data = (float *)malloc(sizeof(float)*NUM_PRIORS*NUM_CLASSES*batch);
+      conf_data = (float *)malloc(sizeof(float)*NUM_PRIORS*NUM_CLASSES*batch_size);
+      check_alloc(conf_data, "Confidence data");
 
       /* Allocate mask data output buffers */
-      mask_data = (float *)malloc(sizeof(float)*NUM_PRIORS*PROTO_C*batch);
+      mask_data = (float *)malloc(sizeof(float)*NUM_PRIORS*PROTO_C*batch_size);
+      check_alloc(mask_data, "Mask data");
 
       /* Compute prior boxes */
-      prior_data = (box_t *)malloc(sizeof(box_t)*NUM_PRIORS*batch);
+      prior_data = (box_t *)malloc(sizeof(box_t)*NUM_PRIORS*batch_size);
+      check_alloc(prior_data, "Prior box data");
       create_priors(prior_data);
+
+      return batch_size;
     }
 
-    void run( cv::Mat &img, cv::Mat &output_img, float score_thresh )
+    void run( std::vector<cv::Mat> &img,
+              float                 nms_conf_thresh,
+              float                 nms_thresh,
+              float                 score_thresh )
     {
+      /* Save threshold values */
+      l_nms_thresh = (nms_thresh < 0.0f) ? NMS_THRESH : nms_thresh;
+      l_nms_conf_thresh = (nms_conf_thresh < 0.0f) ? NMS_CONF_THRESH : nms_conf_thresh;
+
       /* Get the input/output tensor buffer handles */
       auto l_runner = runner.get();
       auto in_tensor_buff = l_runner->get_inputs();
       auto out_tensor_buff = l_runner->get_outputs();
 
-      /* Pre-process the data */
-      pre_timer.start();
-      preprocess(img, in_tensor_buff);
-
-      /* Sync input tensor buffers */
-      for (auto& input : in_tensor_buff)
+      /* Process input data */
+      int iter = 0;
+      while (iter < img.size())
       {
-        input->sync_for_write(0, input->get_tensor()->get_data_size() / input->get_tensor()->get_shape()[0]);
+        std::vector<cv::Mat> img_buff;
+        for (int b = 0; b < batch_size; b++)
+        {
+          img_buff.push_back(img[iter+b]);
+        }
+
+        /* Pre-process the data */
+        pre_timer.start();
+        preprocess(img_buff, in_tensor_buff);
+
+        /* Sync input tensor buffers */
+        for (auto& input : in_tensor_buff)
+        {
+          input->sync_for_write(0, input->get_tensor()->get_data_size() / input->get_tensor()->get_shape()[0]);
+        }
+        pre_timer.stop();
+
+        /* Execute the graph */
+        exec_timer.start();
+        auto v = l_runner->execute_async(in_tensor_buff, out_tensor_buff);
+        auto status = l_runner->wait((int)v.first, -1);
+        CHECK_EQ(status, 0) << "failed to run the graph";
+        exec_timer.stop();
+
+        /* Sync output tensor buffers */
+        post_timer.start();
+        for (auto output : out_tensor_buff)
+        {
+          output->sync_for_read(0, output->get_tensor()->get_data_size() / output->get_tensor()->get_shape()[0]);
+        }
+
+        /* Post-process that data */
+        postprocess(out_tensor_buff);
+        post_timer.stop();
+
+        /* Create graphic overlays */
+        overlay_timer.start();
+        create_overlays(img_buff, score_thresh);
+        overlay_timer.stop();
+
+        for (int b = 0; b < batch_size; b++)
+        {
+          img[iter+b] = img_buff[b];
+        }
+
+        iter += batch_size;
       }
-      pre_timer.stop();
-
-      /* Execute the graph */
-      exec_timer.start();
-      auto v = l_runner->execute_async(in_tensor_buff, out_tensor_buff);
-      auto status = l_runner->wait((int)v.first, -1);
-      CHECK_EQ(status, 0) << "failed to run the graph";
-      exec_timer.stop();
-
-      /* Sync output tensor buffers */
-      post_timer.start();
-      for (auto output : out_tensor_buff)
-      {
-        output->sync_for_read(0, output->get_tensor()->get_data_size() / output->get_tensor()->get_shape()[0]);
-      }
-
-      /* Post-process that data */
-      postprocess(out_tensor_buff);
-      post_timer.stop();
-
-      /* Create graphic overlays */
-      overlay_timer.start();
-      create_overlays(img, output_img, score_thresh);
-      overlay_timer.stop();
     }
 
-    void print_stats()
+    void print_stats( )
     {
       char time_str[20];
-      sprintf(time_str, "%1.3f", pre_timer.avg_secs());
+      sprintf(time_str, "%1.3f", pre_timer.avg_secs() / (float)batch_size);
       std::cout << "Average pre-processing  time (CPU)       = " << time_str << " seconds" << std::endl;
-      sprintf(time_str, "%1.3f", exec_timer.avg_secs());
+      sprintf(time_str, "%1.3f", exec_timer.avg_secs() / (float)batch_size);
       std::cout << "Average graph execution time (CPU + DPU) = " << time_str << " seconds" << std::endl;
-      sprintf(time_str, "%1.3f", post_timer.avg_secs());
+      sprintf(time_str, "%1.3f", post_timer.avg_secs() / (float)batch_size);
       std::cout << "Average post-processing time (CPU)       = " << time_str << " seconds" << std::endl;
-      sprintf(time_str, "%1.3f", overlay_timer.avg_secs());
+      sprintf(time_str, "%1.3f", overlay_timer.avg_secs() / (float)batch_size);
       std::cout << "Average graphic overlay time (CPU)       = " << time_str << " seconds" << std::endl;
     }
 
@@ -196,14 +230,26 @@ class yolact
     std::map<int, std::vector<float>> masks;
     std::vector<box_t> box_results;
     std::vector<std::vector<float>> mask_results;
-
-    const int tensor_offset[5] = { 0, 14283, 17958, 18930, 19173 };
+    std::vector<int> batch_index;
+    int batch_size;
+    float l_nms_conf_thresh;
+    float l_nms_thresh;
 
     lnx_timer pre_timer, exec_timer, post_timer, overlay_timer;
 
     /*************************************************************************
      * Functions                                                             *
      *************************************************************************/
+
+    void check_alloc( void *buffer, string name )
+    {
+      if (buffer == NULL)
+      {
+        std::cout << "Allocation of buffer for " << name << " failed." << std::endl;
+        std::cout << "Try reducing the number of processing threads or input images" << endl;
+        exit(1);
+      }
+    }
 
     /* This function taken from
      * Vitis-AI/demo/Vitis-AI-Library/samples/graph_runner/resnet50_graph_runner/resnet50_graph_runner.cpp
@@ -233,13 +279,17 @@ class yolact
        *   backbone.preapply_sqrt = False
        *   backbone.use_pixel_scales = True
        *   backbone.use_square_anchors = True
+       *   backbone.preapply_sqrt = True
        */
-
-      const int max_size = 550;  // Maximum image size (550x550)
+      const float inv_max_size = 1.0f / 550.0f;  // Maximum image size (550x550)
       const int num_priors = 19248;
       const int fmap_dims[5] = {69, 35, 18, 9, 5};
       const int scales[5] = {24, 48, 96, 192, 384};
-      const float aspect_ratios[5][3] = {{1, 0.5, 2}, {1, 0.5, 2}, {1, 0.5, 2}, {1, 0.5, 2}, {1, 0.5, 2}};
+      const float aspect_ratios[5][3] = { {1.0f, 0.7071068f, 1.4142135f},
+                                          {1.0f, 0.7071068f, 1.4142135f},
+                                          {1.0f, 0.7071068f, 1.4142135f},
+                                          {1.0f, 0.7071068f, 1.4142135f},
+                                          {1.0f, 0.7071068f, 1.4142135f} };
 
       box_t prior_box;
 
@@ -257,20 +307,21 @@ class yolact
 
             for (int r = 0; r < 3; r++)
             {
-              prior_box.w = scale * aspect_ratios[k][r] / max_size;
+              prior_box.w = scale * aspect_ratios[k][r] * inv_max_size;
               prior_box.h = prior_box.w;
               *prior_data++ = prior_box;
             }
           }
         }
       }
+
     }
 
     /* This function modified from
      * Vitis-AI/demo/Vitis-AI-Library/samples/graph_runner/resnet50_graph_runner/resnet50_graph_runner.cpp
      */
-    void preprocess(const cv::Mat& frame,
-                    const std::vector<vart::TensorBuffer*>& input_tensor_buffers)
+    void preprocess( std::vector<cv::Mat>             &img,
+                     std::vector<vart::TensorBuffer*> &input_tensor_buffers)
     {
       auto input_tensor = input_tensor_buffers[0]->get_tensor();
       auto batch = input_tensor->get_shape().at(0);
@@ -285,6 +336,7 @@ class yolact
       for (int index = 0; index < batch; ++index)
       {
         cv::Mat resize_image;
+        cv::Mat frame = img[index];
         if (size != frame.size())
         {
           cv::resize(frame, resize_image, size);
@@ -303,13 +355,13 @@ class yolact
       }
     }
 
-     /* This function modified from
+    /* This function modified from
      * Vitis-AI/demo/Vitis-AI-Library/samples/graph_runner/resnet50_graph_runner/resnet50_graph_runner.cpp
      */
     static void set_input_image(const cv::Mat& image, void* data_in, float fix_scale)
     {
-      float mean[3] = {103.94f, 116.78f, 123.68f}; // BGR
-      float scale[3] = {fix_scale/57.38f, fix_scale/57.12f, fix_scale/58.40f};
+      float mean[3] = {123.68f, 116.78f, 103.94f}; // BGR
+      float scale[3] = {fix_scale/58.40f, fix_scale/57.12f, fix_scale/57.38f};
       signed char* data = (signed char*)data_in;
 
       for (int h = 0; h < image.rows; h++)
@@ -385,7 +437,7 @@ class yolact
             }
             else
             {
-               fprintf(proto_file[c], "\n");
+              fprintf(proto_file[c], "\n");
             }
           }
         }
@@ -403,14 +455,43 @@ class yolact
       return 1.0f / (1.0f + exp(-x));
     }
 
+    /* Sort the final results by score */
+    void sort_results(  std::vector<box_t>              &boxes,
+                        std::vector<std::vector<float>> &masks,
+                        int                              batch_start,
+                        int                              batch_end )
+    {
+      for (int i = 0; i < boxes.size(); i++)
+      {
+        for (int k = i+1; k < boxes.size(); k++)
+        {
+          if (boxes[k].score > boxes[i].score)
+          {
+            box_t temp_box = boxes[i];
+            boxes[i] = boxes[k];
+            boxes[k] = temp_box;
+
+            std::vector<float> temp_mask = masks[i];
+            masks[i] = masks[k];
+            masks[k] = temp_mask;
+          }
+        }
+      }
+
+    }
+
     /* Adds mask overlays to output image */
     void draw_masks( cv::Mat                         &img,
                      std::vector<box_t>               boxes,
                      std::vector<std::vector<float>>  masks,
+                     int                              batch_start,
+                     int                              batch_end,
                      float                           *proto_data,
                      float                            score_thresh )
     {
-      for (int i = 0; i < masks.size(); i++)
+      int c_idx = 0;
+
+      for (int i = batch_start; i < batch_end; i++)
       {
         if (boxes[i].score < score_thresh)
         {
@@ -453,7 +534,7 @@ class yolact
         crop.copyTo(m2(roi));
 
         /* Apply mask to input image mask_img = (img * mask_alpha) + () mask_color * (1 - mask_alpha)) */
-        cv::Scalar color = get_color(i);
+        cv::Scalar color = get_color(c_idx++);
 
         for (int h = 0; h < m2.rows; h++)
         {
@@ -473,12 +554,13 @@ class yolact
     }
 
     /* Adds bounding boxes to output image */
-    void draw_boxes( cv::Mat &img, std::vector<box_t> boxes, float score_thresh )
+    void draw_boxes( cv::Mat &img, std::vector<box_t> boxes, int batch_start, int batch_end, float score_thresh )
     {
       float width = img.cols;
       float height = img.rows;
+      int c_idx = 0;
 
-      for (int i = boxes.size()-1; i >= 0; i--)
+      for (int i = batch_start; i < batch_end; i++)
       {
         box_t box = boxes[i];
         if (box.score < score_thresh)
@@ -493,29 +575,29 @@ class yolact
         int ymax = std::min(std::max(ymin + (box.h * height), 0.0f), height);
 
         /* Get the bounding box color & draw the bounding box on the input image */
-        cv::Scalar color = get_color(i);
+        cv::Scalar color = get_color(c_idx++);
         cv::rectangle(img, cv::Point(xmin, ymin), cv::Point(xmax, ymax), color, 1, 1, 0);
 
         /* Format the score & class label text */
         char score_str[4];
-        sprintf(score_str, "%1.2f", box.score+0.005f);
+        sprintf(score_str, "%1.2f", box.score);
         std::string label = coco_labels[box.label] + ": " + std::string(score_str);
         cv::Size txt_size = cv::getTextSize(label, cv::FONT_HERSHEY_DUPLEX, 0.6, 1, NULL);
 
         /* Draw the class label & score on the image */
         cv::Rect roi;
         roi.x = xmin;
-        roi.y = std::min(std::max(ymin-txt_size.height-8, 0), (int)height);
-        roi.width = std::min(std::max(txt_size.width+2, 0), (int)width);
-        roi.height = std::min(std::max(txt_size.height+8, 0), (int)width);
+        roi.y = std::max(ymin-txt_size.height-8, 0);
+        roi.width = (roi.x + txt_size.width+2) > width ? (width - roi.x) : txt_size.width+2;
+        roi.height = (roi.y + txt_size.height+8) > height ? (height - roi.y) : txt_size.height+8;
         img(roi) = color;
         cv::putText(img, label, cv::Point(roi.x, roi.y+txt_size.height), cv::FONT_HERSHEY_DUPLEX, 0.6, cv::Scalar(255,255,255), 1, cv::LINE_AA, 0);
       }
     }
 
     // This function modified from Vitis-AI/tools/Vitis-AI-Library/xnnpp/src/ssd/ssd_detector.cpp
-    void decode_bbox( float        *bbox_ptr,
-                      int           idx )
+    void decode_bbox( float *bbox_ptr,
+                      int    idx )
     {
       const float var[2] = {0.1f, 0.2f};
       std::vector<float> bbox(4);
@@ -567,7 +649,7 @@ class yolact
       {
         auto score = *conf_data;
 
-        if (score > NMS_CONF_THRESH)
+        if (score > l_nms_conf_thresh)
         {
           score_index_vec->emplace_back(score, i);
         }
@@ -639,7 +721,7 @@ class yolact
         i++;
       }
 
-      applyNMS( boxes, scores, NMS_THRESH, NMS_CONF_THRESH, results );
+      applyNMS( boxes, scores, l_nms_thresh, l_nms_conf_thresh, results );
 
       for (auto &r : results)
       {
@@ -654,7 +736,8 @@ class yolact
                  box_t                           *prior_data,
                  float                           *proto_data,
                  std::vector<box_t>               &box_result,
-                 std::vector<std::vector<float>>  &mask_result )
+                 std::vector<std::vector<float>>  &mask_result,
+                 std::vector<int>                 &batch_index )
     {
 
       decoded_bboxes.clear();
@@ -695,6 +778,7 @@ class yolact
                      const tuple<float, int, int>& rhs) {
                     return get<0>(lhs) > get<0>(rhs);
                   });
+
         score_index_tuples.resize(KEEP_TOP_K);
 
         indices.clear();
@@ -704,6 +788,16 @@ class yolact
         {
           indices[get<1>(item)].push_back(get<2>(item));
         }
+      }
+
+      int b_idx = 0;
+      if (batch_index.empty())
+      {
+        batch_index.push_back(b_idx);
+      }
+      else
+      {
+        b_idx = batch_index.back();
       }
 
       for (auto label = 1u; label < indices.size(); ++label)
@@ -722,20 +816,21 @@ class yolact
           box_res.h = bbox[3];
           box_result.emplace_back(box_res);
           mask_result.emplace_back(mask);
+          b_idx++;
         }
       }
+      batch_index.push_back(b_idx);
     }
 
     /* Copies data from tensor output buffer to host memory */
     void copy_data( float *input,
-        float *output,
-        int    idx,
-        size_t size,
-        int    batch,
-        int    elements,
-        int    channels )
+                    float *output,
+                    size_t size,
+                    int    batch,
+                    int    elements,
+                    int    channels )
     {
-      int offset = tensor_offset[idx] * channels;
+      int offset = 0;
       for (int i = 0; i < batch; i++)
       {
         memcpy( &output[offset], &input[i*elements], size );
@@ -747,7 +842,7 @@ class yolact
     {
       uint64_t data_out = 0;
       size_t size_out = 0;
-
+      int batch = 1;
 
       /* Copy tensor output data to host memory */
       for (auto &tensor_buffer : output_tensor_buffer)
@@ -758,16 +853,15 @@ class yolact
         idx[0] = 0;
         std::tie(data_out, size_out) = tensor_buffer->data(idx);
         auto shape = output_tensor->get_shape();
-        int batch = shape.front();
+        batch = shape.front();
         int num_elements = output_tensor->get_element_num() / batch;
         int num_channels = shape.back();
         size_out /= batch;
 
         /* Prototype output */
-        if (!tensor_name.compare("Yolact__Yolact_13058_fix_")) // Prototype output
+        if (!tensor_name.compare("Yolact__Yolact_13022_fix_")) // Prototype output
         {
-          //std::cout << "  Proto data" << std::endl;
-          memcpy(proto_data, (float *)data_out, size_out);
+          memcpy(proto_data, (float *)data_out, size_out*batch);
 
 #ifdef SHOW_PROTO_IMAGES
           show_prototypes(proto_data);
@@ -778,102 +872,41 @@ class yolact
 #endif
         }
 
-        /* Copy location data 0 to host memory */
-        else if (!tensor_name.compare("Yolact__Yolact_PredictionModule_prediction_layers__ModuleList_0__13127_fix_"))
+  /* Copy mask data to host memory */
+        else if (!tensor_name.compare("Yolact__Yolact_13715"))
         {
-          copy_data( (float *)data_out, loc_data, 0, size_out, batch, num_elements, num_channels );
+          copy_data( (float *)data_out, mask_data, size_out, batch, num_elements, num_channels );
         }
 
-        /* Copy location data 1 to host memory */
-        else if (!tensor_name.compare("Yolact__Yolact_PredictionModule_prediction_layers__ModuleList_1__13263_fix_"))
+  /* Copy confidence data to host memory */
+        else if (!tensor_name.compare("Yolact__Yolact_13718"))
         {
-          copy_data( (float *)data_out, loc_data, 1, size_out, batch, num_elements, num_channels );
+          copy_data( (float *)data_out, conf_data, size_out, batch, num_elements, num_channels );
         }
 
-        /* Copy location data 2 to host memory */
-        else if (!tensor_name.compare("Yolact__Yolact_PredictionModule_prediction_layers__ModuleList_2__13399_fix_"))
+  /* Copy location data to host memory */
+        else if (!tensor_name.compare("Yolact__Yolact_13708_fix_"))
         {
-          copy_data( (float *)data_out, loc_data, 2, size_out, batch, num_elements, num_channels );
-        }
-
-        /* Copy location data 3 to host memory */
-        else if (!tensor_name.compare("Yolact__Yolact_PredictionModule_prediction_layers__ModuleList_3__13535_fix_"))
-        {
-          copy_data( (float *)data_out, loc_data, 3, size_out, batch, num_elements, num_channels );
-        }
-
-        /* Copy location data 4 to host memory */
-        else if (!tensor_name.compare("Yolact__Yolact_PredictionModule_prediction_layers__ModuleList_4__13671_fix_"))
-        {
-          copy_data( (float *)data_out, loc_data, 4, size_out, batch, num_elements, num_channels );
-        }
-
-        /* Copy confidence data 0 to host memory */
-        else if (!tensor_name.compare("Yolact__Yolact_13749"))
-        {
-          copy_data( (float *)data_out, conf_data, 0, size_out, batch, num_elements, num_channels );
-        }
-
-        /* Copy confidence data 1 to host memory */
-        else if (!tensor_name.compare("Yolact__Yolact_13752"))
-        {
-          copy_data( (float *)data_out, conf_data, 1, size_out, batch, num_elements, num_channels );
-        }
-
-        /* Copy confidence data 2 to host memory */
-        else if (!tensor_name.compare("Yolact__Yolact_13755"))
-        {
-          copy_data( (float *)data_out, conf_data, 2, size_out, batch, num_elements, num_channels );
-        }
-
-        /* Copy confidence data 3 to host memory */
-        else if (!tensor_name.compare("Yolact__Yolact_13758"))
-        {
-          copy_data( (float *)data_out, conf_data, 3, size_out, batch, num_elements, num_channels );
-        }
-
-        /* Copy confidence data 4 to host memory */
-        else if (!tensor_name.compare("Yolact__Yolact_13761"))
-        {
-          copy_data( (float *)data_out, conf_data, 4, size_out, batch, num_elements, num_channels );
-        }
-
-        /* Copy mask data 0 to host memory */
-        else if (!tensor_name.compare("Yolact__Yolact_PredictionModule_prediction_layers__ModuleList_0__13198"))
-        {
-          copy_data( (float *)data_out, mask_data, 0, size_out, batch, num_elements, num_channels );
-        }
-
-        /* Copy mask data 1 to host memory */
-        else if (!tensor_name.compare("Yolact__Yolact_PredictionModule_prediction_layers__ModuleList_1__13334"))
-        {
-          copy_data( (float *)data_out, mask_data, 1, size_out, batch, num_elements, num_channels );
-        }
-
-        /* Copy mask data 2 to host memory */
-        else if (!tensor_name.compare("Yolact__Yolact_PredictionModule_prediction_layers__ModuleList_2__13470"))
-        {
-          copy_data( (float *)data_out, mask_data, 2, size_out, batch, num_elements, num_channels );
-        }
-
-        /* Copy mask data 3 to host memory */
-        else if (!tensor_name.compare("Yolact__Yolact_PredictionModule_prediction_layers__ModuleList_3__13606"))
-        {
-          copy_data( (float *)data_out, mask_data, 3, size_out, batch, num_elements, num_channels );
-        }
-
-        /* Copy mask data 4 to host memory */
-        else if (!tensor_name.compare("Yolact__Yolact_PredictionModule_prediction_layers__ModuleList_4__13742"))
-        {
-          copy_data( (float *)data_out, mask_data, 4, size_out, batch, num_elements, num_channels );
+          copy_data( (float *)data_out, loc_data, size_out, batch, num_elements, num_channels );
         }
       }
 
       /* Process detections */
       box_results.clear();
       mask_results.clear();
+      batch_index.clear();
 
-      detect( loc_data, conf_data, mask_data, prior_data, proto_data, box_results, mask_results );
+      for (int b = 0; b < batch; b++)
+      {
+        detect( &loc_data[NUM_PRIORS*4*b],
+                &conf_data[NUM_PRIORS*NUM_CLASSES*b],
+                &mask_data[NUM_PRIORS*PROTO_C*b],
+                &prior_data[NUM_PRIORS*4*b],
+                &proto_data[PROTO_SIZE*b],
+                 box_results,
+                 mask_results,
+                 batch_index );
+      }
     }
 
     /* Mask & box color look-up */
@@ -891,12 +924,20 @@ class yolact
       return colors[(label*5)%19];
     }
 
-    void create_overlays( cv::Mat &img, cv::Mat &output_img, float score_thresh )
+    void create_overlays( std::vector<cv::Mat> &img, float score_thresh )
     {
       /* Draw output image overlay */
-      img.copyTo(output_img);
-      draw_masks( output_img, box_results, mask_results, proto_data, score_thresh );
-      draw_boxes( output_img, box_results, score_thresh );
+      for (int i = 0; i < img.size(); i++)
+      {
+        int batch_start = batch_index[i];
+        int batch_end   = batch_index[i+1];
+
+        // Sort the results based on score so colors look the same as running the model on dev. machine
+        sort_results(box_results, mask_results, batch_start, batch_end);
+
+        draw_masks( img[i], box_results, mask_results, batch_start, batch_end, &proto_data[PROTO_SIZE*i], score_thresh );
+        draw_boxes( img[i], box_results, batch_start, batch_end, score_thresh );
+      }
     }
 
 };

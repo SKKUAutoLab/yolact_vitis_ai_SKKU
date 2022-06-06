@@ -197,18 +197,18 @@ class PredictionModule(nn.Module):
             bbox[:, :, 0] /= conv_w
             bbox[:, :, 1] /= conv_h
 
-        if cfg.eval_mask_branch:
-            if cfg.mask_type == mask_type.direct:
-                mask = torch.sigmoid(mask)
-            elif cfg.mask_type == mask_type.lincomb:
-                mask = cfg.mask_proto_coeff_activation(mask)
-
-                if cfg.mask_proto_coeff_gate:
-                    gate = src.gate_layer(x).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.mask_dim)
-                    mask = mask * torch.sigmoid(gate)
-
-        if cfg.mask_proto_split_prototypes_by_head and cfg.mask_type == mask_type.lincomb:
-            mask = F.pad(mask, (self.index * self.mask_dim, (self.num_heads - self.index - 1) * self.mask_dim), mode='constant', value=0)
+#        if cfg.eval_mask_branch:
+#            if cfg.mask_type == mask_type.direct:
+#                mask = torch.sigmoid(mask)
+#            elif cfg.mask_type == mask_type.lincomb:
+#                mask = cfg.mask_proto_coeff_activation(mask)
+#
+#                if cfg.mask_proto_coeff_gate:
+#                    gate = src.gate_layer(x).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.mask_dim)
+#                    mask = mask * torch.sigmoid(gate)
+#
+#        if cfg.mask_proto_split_prototypes_by_head and cfg.mask_type == mask_type.lincomb:
+#            mask = F.pad(mask, (self.index * self.mask_dim, (self.num_heads - self.index - 1) * self.mask_dim), mode='constant', value=0)
         
         preds = { 'loc': bbox, 'conf': conf, 'mask': mask }
 
@@ -601,6 +601,15 @@ class Yolact(nn.Module):
                     pred_outs[k].append(v)
 
 
+        for k, v in pred_outs.items():
+            pred_outs[k] = torch.cat(v,dim=1)
+
+        if cfg.eval_mask_branch:
+            if cfg.mask_type == mask_type.direct:
+                pred_outs['mask'] = torch.sigmoid(pred_outs['mask'])
+            elif cfg.mask_type == mask_type.lincomb:
+                pred_outs['mask'] = cfg.mask_proto_coeff_activation(pred_outs['mask'])
+        
         if proto_out is not None:
             pred_outs['proto'] = proto_out
 
@@ -638,9 +647,7 @@ class Yolact(nn.Module):
                         * F.softmax(pred_outs['conf'][:, :, 1:], dim=-1)
                     
                 else:
-                    for k in range(len(pred_outs['conf'])):
-                        pred_outs['conf'][k] = F.softmax(pred_outs['conf'][k], dim=-1)
-        
+                    pred_outs['conf'] = F.softmax(pred_outs['conf'], -1)
         
         return pred_outs
 

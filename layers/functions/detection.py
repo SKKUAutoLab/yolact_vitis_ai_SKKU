@@ -62,17 +62,17 @@ class Detect(object):
         """
 
         if is_quant:
-            loc_data   = torch.cat(predictions[0:5], -2)
-            conf_data  = torch.cat(predictions[5:10], -2)
-            mask_data  = torch.cat(predictions[10:15], -2)
+            loc_data   = predictions[0]
+            conf_data  = predictions[1]
+            mask_data  = predictions[2]
+            proto_data = predictions[3]
             prior_data = priors
-            proto_data = predictions[15]
             inst_data  = None 
  
         else:
-            loc_data   = torch.cat(predictions['loc'], -2)
-            conf_data  = torch.cat(predictions['conf'], -2)
-            mask_data  = torch.cat(predictions['mask'], -2)
+            loc_data   = predictions['loc']
+            conf_data  = predictions['conf']
+            mask_data  = predictions['mask']
             prior_data = priors
 
             proto_data = predictions['proto'] if 'proto' in predictions else None
