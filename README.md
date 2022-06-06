@@ -36,7 +36,6 @@ Some examples using the YOLACT base model (Processed using AMD/Xilinx VCK190 dev
 ![Example 1](data/result_0.jpg)
 ![Example 2](data/result_1.jpg)
 ![Example 3](data/result_2.jpg)
-![Example 4](data/result_3.jpg)
 
 # Installation
  - Clone the Vitis-AI repository
@@ -147,11 +146,13 @@ The command above stores the floating-point result in output_image.jpg, and the 
 
  - Copy the compiled model to the target application directory
    ```bash
+   mkdir -p target_app/yolact/model
    cp compiled_yolact_model/yolact.xmodel target_app/yolact/model/.
    ```
 
  - Copy test data from the COCO data set to the target application directory
    ```bash
+   mkdir -p target_app/yolact/data/images
    cp data/coco/images/000000000552.jpg target_app/yolact/data/images/.
    cp data/coco/images/000000103817.jpg target_app/yolact/data/images/.
    cp data/coco/images/000000403834.jpg target_app/yolact/data/images/.
@@ -175,13 +176,15 @@ The command above stores the floating-point result in output_image.jpg, and the 
     ```bash
     ./yolact.exe --image data/images/000000000552.jpg
     ```
+    
+    **Note:** If you would like to display the result on a monitor connected to the development board then you will need to set the ``DISPLAY`` environment variable to ``:0.0``
 
   - **On the development board** run the test application with multiple image
     ```bash
     ./yolact.exe \
-        --image data/images/000000403834.jpg \
-        --image data/images/000000103817.jpg \
         --image data/images/000000000552.jpg \
+        --image data/images/000000103817.jpg \
+        --image data/images/000000403834.jpg \
         --image data/images/000000482002.jpg
     ```
 
