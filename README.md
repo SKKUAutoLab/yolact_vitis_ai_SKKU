@@ -180,7 +180,7 @@ The command above stores the floating-point result in output_image.jpg, and the 
 
   - **On the development board** run the test application with a single image
     ```bash
-    ./yolact.exe --image data/images/000000000552.jpg
+    ./yolact.exe --image data/images/000000000552.jpg --score_thresh 0.5
     ```
 
     **Note:** If you would like to display the result on a monitor connected to the development board then you will need to set the ``DISPLAY`` environment variable to ``:0.0``
@@ -191,7 +191,8 @@ The command above stores the floating-point result in output_image.jpg, and the 
         --image data/images/000000000552.jpg \
         --image data/images/000000103817.jpg \
         --image data/images/000000403834.jpg \
-        --image data/images/000000482002.jpg
+        --image data/images/000000482002.jpg \
+        --score_thresh 0.5
     ```
 
   **Note:** The target test application only uses a single SW thread, and greater performance could be achieved through multi-threading
