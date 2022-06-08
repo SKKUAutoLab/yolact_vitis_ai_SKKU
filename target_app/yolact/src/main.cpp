@@ -181,7 +181,7 @@ int main( int argc, char *argv[] )
   }
 
   auto nproc = std::thread::hardware_concurrency();
-  if (num_threads > (nproc+1))
+  if (num_threads > nproc)
   {
     cout << "WARNING: You are using " << num_threads
          << " threads, but your machine only has " << nproc << " processors." << endl;
@@ -346,13 +346,13 @@ int main( int argc, char *argv[] )
       {
         for (int b = 0; b < batch_size; b++)
         {
-	  if (i*num_threads*batch_size + t*batch_size + b >= img_cnt) break;
+          if (i*num_threads*batch_size + t*batch_size + b >= img_cnt) break;
           auto result = images[t][i*batch_size+b];
           cv::imshow("Result", result);
           cv::waitKey(disp_wait);
         }
       }
-    }    
+    }
   }
 
   cout << "Done." << endl;

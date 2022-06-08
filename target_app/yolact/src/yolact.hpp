@@ -14,16 +14,6 @@
  * limitations under the License.
  */
 
-/*
- * This class does not currently have support for batch mode
- * processing with the VCK190.  The VCK190 Vitis-AI pre-built
- * SD card image includes a C32B3 DPU, which is capable of
- * batch size = 3.  This class currently just copies a single
- * input image to each batch input of the DPU.  Ideally,
- * this class would recieve multiple input images, and use
- * the batching capabilities of the DPU.
- */
-
 #include <iostream>
 #include <string>
 #include <vector>
@@ -98,23 +88,18 @@ class yolact
 
       /* Allocate prototype output buffers */
       proto_data = (float *)malloc(sizeof(float)*PROTO_SIZE*batch_size); // 138x138x32
-      check_alloc(proto_data, "Prototype data");
 
       /* Allocate location data output buffer */
       loc_data = (float *)malloc(sizeof(float)*NUM_PRIORS*4*batch_size);
-      check_alloc(loc_data, "Location data");
 
       /* Allocate confidence data output buffers */
       conf_data = (float *)malloc(sizeof(float)*NUM_PRIORS*NUM_CLASSES*batch_size);
-      check_alloc(conf_data, "Confidence data");
 
       /* Allocate mask data output buffers */
       mask_data = (float *)malloc(sizeof(float)*NUM_PRIORS*PROTO_C*batch_size);
-      check_alloc(mask_data, "Mask data");
 
       /* Compute prior boxes */
       prior_data = (box_t *)malloc(sizeof(box_t)*NUM_PRIORS*batch_size);
-      check_alloc(prior_data, "Prior box data");
       create_priors(prior_data);
 
       return batch_size;
@@ -176,12 +161,12 @@ class yolact
         /* Create graphic overlays */
         overlay_timer.start();
         create_overlays(img_buff, score_thresh);
-        overlay_timer.stop();
 
         for (int b = 0; b < batch_size; b++)
         {
           img[iter+b] = img_buff[b];
         }
+        overlay_timer.stop();
 
         iter += batch_size;
       }
@@ -241,16 +226,6 @@ class yolact
      * Functions                                                             *
      *************************************************************************/
 
-    void check_alloc( void *buffer, string name )
-    {
-      if (buffer == NULL)
-      {
-        std::cout << "Allocation of buffer for " << name << " failed." << std::endl;
-        std::cout << "Try reducing the number of processing threads or input images" << endl;
-        exit(1);
-      }
-    }
-
     /* This function taken from
      * Vitis-AI/demo/Vitis-AI-Library/samples/graph_runner/resnet50_graph_runner/resnet50_graph_runner.cpp
      */
@@ -276,7 +251,6 @@ class yolact
     void create_priors(box_t *prior_data)
     {
       /* The following configuration is used to create priors (based on yolact/data/config.py):
-       *   backbone.preapply_sqrt = False
        *   backbone.use_pixel_scales = True
        *   backbone.use_square_anchors = True
        *   backbone.preapply_sqrt = True
@@ -296,14 +270,14 @@ class yolact
       for (int k = 0; k < 5; k++)
       {
         float scale = scales[k];
-        float inv_fmap_dims = 1.0f / fmap_dims[k];
+        float inv_fmap_dims = 1.0f / (float)fmap_dims[k];
 
         for (int j = 0; j < fmap_dims[k]; j++)
         {
           for (int i = 0; i < fmap_dims[k]; i++)
           {
-            prior_box.x = (i + 0.5f) * inv_fmap_dims;
-            prior_box.y = (j + 0.5f) * inv_fmap_dims;
+            prior_box.x = ((float)i + 0.5f) * inv_fmap_dims;
+            prior_box.y = ((float)j + 0.5f) * inv_fmap_dims;
 
             for (int r = 0; r < 3; r++)
             {
@@ -357,12 +331,15 @@ class yolact
 
     /* This function modified from
      * Vitis-AI/demo/Vitis-AI-Library/samples/graph_runner/resnet50_graph_runner/resnet50_graph_runner.cpp
+     * The mean & scale values are taken from yolact/data/config.py and are slightly different
+     * than expected for the torchvision pre-trained imagenet ResNet-50 model.  Torchvision models use mean
+     * values of [103.53, 116.28, 123.675] and std (i.e. scale) values of [57.375, 57.12, 58.395].
      */
     static void set_input_image(const cv::Mat& image, void* data_in, float fix_scale)
     {
-      float mean[3] = {123.68f, 116.78f, 103.94f}; // BGR
-      float scale[3] = {fix_scale/58.40f, fix_scale/57.12f, fix_scale/57.38f};
-      signed char* data = (signed char*)data_in;
+      float mean[3] = {103.94f, 116.78f, 123.68f}; // BGR
+      float scale[3] = {fix_scale/57.38f, fix_scale/57.12f, fix_scale/58.4f};
+      signed char *data = (signed char*)data_in;
 
       for (int h = 0; h < image.rows; h++)
       {
@@ -371,7 +348,7 @@ class yolact
           for (int c = 0; c < 3; c++)
           {
             auto image_data = ((float)image.at<cv::Vec3b>(h, w)[c] - mean[c]) * scale[c];
-            data[h * image.cols * 3 + w * 3 + c] = (int)image_data;
+            data[h * image.cols * 3 + w * 3 + c] = (int)(image_data + 0.5f);
           }
         }
       }
@@ -461,9 +438,9 @@ class yolact
                         int                              batch_start,
                         int                              batch_end )
     {
-      for (int i = 0; i < boxes.size(); i++)
+      for (int i = batch_start; i < batch_end; i++)
       {
-        for (int k = i+1; k < boxes.size(); k++)
+        for (int k = i+1; k < (batch_end-batch_start); k++)
         {
           if (boxes[k].score > boxes[i].score)
           {
@@ -872,19 +849,19 @@ class yolact
 #endif
         }
 
-  /* Copy mask data to host memory */
+        /* Copy mask data to host memory */
         else if (!tensor_name.compare("Yolact__Yolact_13715"))
         {
           copy_data( (float *)data_out, mask_data, size_out, batch, num_elements, num_channels );
         }
 
-  /* Copy confidence data to host memory */
+        /* Copy confidence data to host memory */
         else if (!tensor_name.compare("Yolact__Yolact_13718"))
         {
           copy_data( (float *)data_out, conf_data, size_out, batch, num_elements, num_channels );
         }
 
-  /* Copy location data to host memory */
+        /* Copy location data to host memory */
         else if (!tensor_name.compare("Yolact__Yolact_13708_fix_"))
         {
           copy_data( (float *)data_out, loc_data, size_out, batch, num_elements, num_channels );

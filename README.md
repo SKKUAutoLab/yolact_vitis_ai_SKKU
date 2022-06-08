@@ -83,15 +83,21 @@ Some examples using the YOLACT base model (Processed using AMD/Xilinx VCK190 dev
    ```
 
 # Evaluation
-Here is the Resnet50-FPN YOLACT model (released on April 5th, 2019) along with the estimated FPS and mAP on a AMD/Xilinx VCK190 (C32B3 DPU) with the COCO validation data set:
+Here is the Resnet50-FPN YOLACT model (released on April 5th, 2019) along with the estimated FPS and mAP on a AMD/Xilinx development kits with the COCO validation data set:
 
-| Image Size | Backbone      | estimated FPS  | estimated mAP  | Weights                                                                                                              |  |
+| Image Size | Backbone      | estimated FPS<sup>1</sup>  | estimated mAP<sup>2</sup>  | Weights                                                                                                              |  |
 |:----------:|:-------------:|:----:|:----:|----------------------------------------------------------------------------------------------------------------------|--------|
-| 550        | Resnet50-FPN  | 86.3 | 28.7 | [yolact_resnet50_54_800000.pth](https://drive.google.com/file/d/1yp7ZbbDwvMiFJEq4ptVKTYTI2VeRDXl0/view?usp=sharing)  | [Mirror](https://ucdavis365-my.sharepoint.com/:u:/g/personal/yongjaelee_ucdavis_edu/EUVpxoSXaqNIlssoLKOEoCcB1m0RpzGq_Khp5n1VX3zcUw) |
+| 550        | Resnet50-FPN  | 86 (VCK190<sup>3</sup>) | 28.7 | [yolact_resnet50_54_800000.pth](https://drive.google.com/file/d/1yp7ZbbDwvMiFJEq4ptVKTYTI2VeRDXl0/view?usp=sharing)  | [Mirror](https://ucdavis365-my.sharepoint.com/:u:/g/personal/yongjaelee_ucdavis_edu/EUVpxoSXaqNIlssoLKOEoCcB1m0RpzGq_Khp5n1VX3zcUw) |
+| 550        | Resnet50-FPN  | 14 (ZCU104<sup>4</sup>) | 28.7 | [yolact_resnet50_54_800000.pth](https://drive.google.com/file/d/1yp7ZbbDwvMiFJEq4ptVKTYTI2VeRDXl0/view?usp=sharing)  | [Mirror](https://ucdavis365-my.sharepoint.com/:u:/g/personal/yongjaelee_ucdavis_edu/EUVpxoSXaqNIlssoLKOEoCcB1m0RpzGq_Khp5n1VX3zcUw) |
 
-**Note 1:** estimated FPS assumes multi-threading, and does not include pre/post-processing times
+**Notes:**
+  1) the estimated FPS assumes multi-threading, and does not include pre/post-processing times
 
-**Note 2:** estimated mAP measured using the quantized model evaluated on the host system; mAP of compiled model running on target hardware may be different
+  2) the estimated mAP is measured using the quantized model evaluated on the host system; mAP of compiled model running on target hardware may be different
+
+  3) Performance measured using the ``xdputil benchmark`` utility on the VCK190 configured with the ``C32B3`` DPU
+
+  4) Performance measured using the ``xdputil benchmark`` utility on the ZCU104 configured with dual ``B4096`` DPUs
 
 To evalute the model, put the corresponding weights file in the `./weights` directory and run one of the following commands. The name of each config is everything before the numbers in the file name (e.g., `yolact_resnet50` for `yolact_resnet50_54_800000.pth`).
 
@@ -176,7 +182,7 @@ The command above stores the floating-point result in output_image.jpg, and the 
     ```bash
     ./yolact.exe --image data/images/000000000552.jpg
     ```
-    
+
     **Note:** If you would like to display the result on a monitor connected to the development board then you will need to set the ``DISPLAY`` environment variable to ``:0.0``
 
   - **On the development board** run the test application with multiple image
