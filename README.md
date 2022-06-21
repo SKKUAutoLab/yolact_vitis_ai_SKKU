@@ -63,6 +63,8 @@ Some examples using the YOLACT base model (Processed using AMD/Xilinx VCK190 dev
    conda activate vitis-ai-pytorch
    ```
 
+   **NOTE:** From this point forward all commands are intended to be executed inside of the Vitis-AI docker container with the vitis-ai-pytorch conda environment activated.  The exception to this are commands executed on a development kit.
+
 - Change to the ``yolact_vitis_ai`` directory
     ```bash
     cd yolact_vitis_ai
@@ -109,7 +111,7 @@ python eval.py --trained_model=weights/yolact_resnet50_54_800000.pth
 ## Quantize model & evaluate on COCO
 ```bash
 # Perform quantize calibration on the floating-point model to convert to int8 weight & activations
-python eval.py --trained_model=weights/yolact_resnet50_54_800000.pth --quantize_calib --max_images=1000
+python eval.py --trained_model=weights/yolact_resnet50_54_800000.pth --quantize_calibrate --max_images=10
 
 # Perform quantized model evaluation on the entire valdidation set
 python eval.py --trained_model=weights/yolact_resnet50_54_800000.pth --quantize_test
@@ -117,7 +119,7 @@ python eval.py --trained_model=weights/yolact_resnet50_54_800000.pth --quantize_
 
 ## Images
 ```bash
-# Process an image and save it to another file.
+# Process an image on the host development machine using the quantized model and save it to another file.
 python eval.py --trained_model=weights/yolact_resnet50_54_800000.pth --score_threshold=0.15 --top_k=15 --image=data/coco/images/000000000552.jpg:output_image.jpg --quantize_test
 ```
 
@@ -183,9 +185,9 @@ The command above stores the floating-point result in output_image.jpg, and the 
     ./yolact.exe --image data/images/000000000552.jpg --score_thresh 0.5
     ```
 
-    **Note:** If you would like to display the result on a monitor connected to the development board then you will need to set the ``DISPLAY`` environment variable to ``:0.0``
+    **Note:** If you would like to display the result on a **DisplayPort** monitor connected to the development board then you will need to set the ``DISPLAY`` environment variable to ``:0.0``
 
-  - **On the development board** run the test application with multiple image
+  - **On the development board** run the test application with multiple images
     ```bash
     ./yolact.exe \
         --image data/images/000000000552.jpg \

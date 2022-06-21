@@ -836,7 +836,7 @@ class yolact
         size_out /= batch;
 
         /* Prototype output */
-        if (!tensor_name.compare("Yolact__Yolact_13022_fix_")) // Prototype output
+        if (shape[2] == PROTO_HW) // Prototype output
         {
           memcpy(proto_data, (float *)data_out, size_out*batch);
 
@@ -850,19 +850,19 @@ class yolact
         }
 
         /* Copy mask data to host memory */
-        else if (!tensor_name.compare("Yolact__Yolact_13715"))
+        else if (shape[2] == PROTO_C)
         {
           copy_data( (float *)data_out, mask_data, size_out, batch, num_elements, num_channels );
         }
 
         /* Copy confidence data to host memory */
-        else if (!tensor_name.compare("Yolact__Yolact_13718"))
+        else if (shape[2] == NUM_CLASSES)
         {
           copy_data( (float *)data_out, conf_data, size_out, batch, num_elements, num_channels );
         }
 
         /* Copy location data to host memory */
-        else if (!tensor_name.compare("Yolact__Yolact_13708_fix_"))
+        else if (shape[2] == 4)
         {
           copy_data( (float *)data_out, loc_data, size_out, batch, num_elements, num_channels );
         }

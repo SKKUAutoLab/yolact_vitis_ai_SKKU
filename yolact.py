@@ -5,14 +5,14 @@
 ###   2) In the PredictionModule removed prior boxes (from network graph) and related code.  
 ###      Prior box computation moved to eval.py
 ###   3) In FPN network rewrite code to remove element-wise add with 0 valued constant
-###   4) In the FPN network convert non-integer scale factor bilinear interpolation 
-###      operations with bilinear interpolation by integer scale factor
-###   5) Removed unsupported torch.cat() operations from the network outputs
-###   6) In the Prototype network (modification made in utils/functions.py) converted the 
+###   4) In the FPN network converted non-integer scale factor upsample operations  
+###      to upsample by integer scale factor followed by average pooling layer to 
+###      effectively perform upsample by non-integer factor.  
+###   5) In the Prototype network (modification made in utils/functions.py) converted the 
 ###      ReLU that followed the bilinear interpolation operation to torch.nn.Identity().  
 ###      The ReLU following the interpolation layer was preventing the Vitis-AI compiler from 
-###      mapping the interpolation operation to the DPU
-###   7) Remove detection code from the model & move to eval.py as a post-processing function
+###      mapping the interpolation operation to the DPU and had no effect on results
+###   6) Remove detection code from the model & move to eval.py as a post-processing function
 ###
 
 import torch, torchvision

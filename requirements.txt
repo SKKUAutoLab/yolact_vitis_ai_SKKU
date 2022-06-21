@@ -3,4 +3,5 @@ opencv-python
 pillow 
 pycocotools 
 matplotlib 
+pandas
 
