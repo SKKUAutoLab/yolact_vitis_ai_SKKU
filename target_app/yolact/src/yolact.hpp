@@ -617,43 +617,35 @@ class yolact
     }
 
     // This function modified from Vitis-AI/tools/Vitis-AI-Library/xnnpp/src/ssd/ssd_detector.cpp
-    void get_one_class_max_score_index( const float              *conf_data,
-                                        int                       label,
-                                        vector<pair<float, int>> *score_index_vec)
+    void get_multi_class_max_score_index( const float                      *conf_data,
+                                          int                               start_label,
+                                          int                               num_classes,
+                                          vector<vector<pair<float, int>>> &score_index_vec)
     {
-      conf_data += label;
       for (int i = 0; i < NUM_PRIORS; i++)
       {
-        auto score = *conf_data;
-
-        if (score > l_nms_conf_thresh)
+        for (int j = start_label; j < start_label + num_classes; j++)
         {
-          score_index_vec->emplace_back(score, i);
+          auto score = conf_data[i*NUM_CLASSES + j];
+          if (score > l_nms_conf_thresh)
+          {
+            score_index_vec[j].emplace_back(score, i);
+          } 
         }
-        conf_data += NUM_CLASSES;
       }
 
-      std::stable_sort(
-          score_index_vec->begin(), score_index_vec->end(),
+      for (int j = start_label; j < start_label + num_classes; j++)
+      {
+        std::stable_sort(
+          score_index_vec[j].begin(), score_index_vec[j].end(),
           [](const pair<float, int>& lhs, const pair<float, int>& rhs) {
             return lhs.first > rhs.first;
           });
 
-      if (NMS_TOP_K < score_index_vec->size())
-      {
-        score_index_vec->resize(NMS_TOP_K);
-      }
-    }
-
-    // This function modified from Vitis-AI/tools/Vitis-AI-Library/xnnpp/src/ssd/ssd_detector.cpp
-    void get_multi_class_max_score_index( const float                      *conf_data,
-                                          int                               start_label,
-                                          int                               num_classes,
-                                          vector<vector<pair<float, int>>> *score_index_vec)
-    {
-      for (auto i = start_label; i < start_label + num_classes; i++)
-      {
-        get_one_class_max_score_index(conf_data, i, &((*score_index_vec)[i]));
+        if (NMS_TOP_K < score_index_vec[j].size())
+        {
+          score_index_vec[j].resize(NMS_TOP_K);
+        }
       }
     }
 
@@ -725,7 +717,7 @@ class yolact
       vector<vector<pair<float, int>>> score_index_vec(NUM_CLASSES);
 
       // Get top_k scores (with corresponding indices).
-      get_multi_class_max_score_index(conf_data, 1, NUM_CLASSES-1, &score_index_vec);
+      get_multi_class_max_score_index(conf_data, 1, NUM_CLASSES-1, score_index_vec);
 
       // Skip the background class by starting at 1 instead of 0
       for (int c = 1; c < NUM_CLASSES; c++)
