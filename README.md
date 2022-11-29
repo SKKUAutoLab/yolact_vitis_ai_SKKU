@@ -168,8 +168,8 @@ The command above stores the floating-point result in output_image.jpg, and the 
    ```
 
  - Follow the target setup instructions for your development kit
-   + [MPSoC boards](https://github.com/Xilinx/Vitis-AI/blob/master/setup/mpsoc/VART/README.md#step2-setup-the-target)
-   + [VCK190](https://github.com/Xilinx/Vitis-AI/blob/master/setup/vck190/README.md#step2-setup-the-target)
+   + [MPSoC boards](https://github.com/Xilinx/Vitis-AI/tree/master/setup/mpsoc#step2-setup-the-target)
+   + [VCK190](https://github.com/Xilinx/Vitis-AI/tree/master/setup/vck190#step2-setup-the-target)
 
 
  - Copy the ``yolact_vitis_ai/target_app/yolact`` directory to the ``/home/root`` directory of your development board
