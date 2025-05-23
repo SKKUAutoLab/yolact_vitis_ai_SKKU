@@ -133,6 +133,14 @@ The command above stores the floating-point result in output_image.jpg, and the 
 
 ## Running on AMD/Xilinx Development Kits
  - Compile the quantized model for the target device
+   + For the Ultra96v2
+     ```
+     vai_c_xir \
+       --xmodel quant_out/Yolact_int.xmodel \
+       --arch arch.json \
+       --net_name yolact \
+       --output_dir compiled_yolact_model 
+     ```
    + For the VCK190
      ```bash
      vai_c_xir \
