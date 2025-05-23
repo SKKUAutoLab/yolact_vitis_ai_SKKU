@@ -61,7 +61,7 @@ Some examples using the YOLACT base model (Processed using AMD/Xilinx VCK190 dev
 
  - Launch the Vitis-AI GPU docker container
    ```bash
-   ./docker_run.sh xilinx/vitis-ai-gpu:latest
+   ./docker_run.sh xilinx/vitis-ai-cpu:latest
    ```
 
  - Activate the Vitis-AI PyTorch conda environment
