@@ -137,7 +137,7 @@ The command above stores the floating-point result in output_image.jpg, and the 
      ```
      vai_c_xir \
        --xmodel quant_out/Yolact_int.xmodel \
-       --arch arch.json \
+       --arch ultra96v2_arch.json \
        --net_name yolact \
        --output_dir compiled_yolact_model 
      ```
