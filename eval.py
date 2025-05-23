@@ -45,8 +45,10 @@ from PIL import Image
 
 import matplotlib.pyplot as plt
 import cv2
-
+import math
 from pytorch_nndct.apis import torch_quantizer, dump_xmodel
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 def str2bool(v):
     if v.lower() in ('yes', 'true', 't', 'y', '1'):
@@ -64,7 +66,7 @@ def parse_args(argv=None):
                         help='Trained state_dict file path to open. If "interrupt", this will open the interrupt file.')
     parser.add_argument('--top_k', default=5, type=int,
                         help='Further restrict the number of predictions to parse')
-    parser.add_argument('--cuda', default=True, type=str2bool,
+    parser.add_argument('--cuda', default=False, type=str2bool,
                         help='Use cuda to evaulate model')
     parser.add_argument('--fast_nms', default=True, type=str2bool,
                         help='Whether to use a faster, but not entirely correct version of NMS.')
@@ -155,41 +157,40 @@ coco_cats = {} # Call prep_coco_cats to fill this
 coco_cats_inv = {}
 color_cache = defaultdict(lambda: {})
 
+
 def make_priors():
-    """ Note that priors are [x,y,width,height] where (x,y) is the center of the box. """
-    
-    fmap_dims     = { 'conv1': 69, 'conv2': 35, 'conv3': 18, 'conv4': 9, 'conv5': 5}
-    scales        = { 'conv1': 24, 'conv2': 48, 'conv3': 96, 'conv4': 192, 'conv5': 384}
-    aspect_ratios = { 'conv1': [1, 0.5, 2], 'conv2': [1, 0.5, 2], 'conv3': [1, 0.5, 2], 'conv4': [1, 0.5, 2], 'conv5': [1, 0.5, 2]}
-    
+    # 1) 레벨별 stride 정의 (Yolact 기본: conv1~5)
+    strides = [8, 16, 32, 64, 128]
+    # 2) backbone 설정에서 pred_scales, aspect_ratios 가져오기
+    scales = [s[0] for s in cfg.backbone.pred_scales]  # [[9],[19],…] → [9,19,…]
+    aspect_ratios = [ar[0] for ar in cfg.backbone.pred_aspect_ratios]  # 같은 방식
+
     prior_boxes = []
 
-    for k, fmap in enumerate(list(fmap_dims.keys())):
-        for j in range(fmap_dims[fmap]):
-            for i in range(fmap_dims[fmap]):
-                # +0.5 because priors are in center-size notation
-                x = (i + 0.5) / fmap_dims[fmap]
-                y = (j + 0.5) / fmap_dims[fmap]
+    for idx, stride in enumerate(strides):
+        # 입력 크기와 stride 에 기반해 피처맵 크기를 동적으로 계산
+        fmap = int(math.ceil(cfg.max_size / stride))
+        scale = scales[idx]
+        ars   = aspect_ratios[idx]
 
-                for ar in aspect_ratios[fmap]:
-                    scale = scales[fmap]
+        for j in range(fmap):
+            for i in range(fmap):
+                x = (i + 0.5) / fmap
+                y = (j + 0.5) / fmap
+
+                for ar in ars:
                     if not cfg.backbone.preapply_sqrt:
-                      ar = sqrt(ar)
+                        ar = math.sqrt(ar)
 
-                    if cfg.backbone.use_pixel_scales:
-                        w = scale * ar / cfg.max_size
-                        h = scale / ar / cfg.max_size
-                    else:
-                        w = scale * ar / conv_w
-                        h = scale / ar / conv_h
-
-                    # This is for backward compatability with a bug where I made everything square by accident
+                    w = scale * ar / cfg.max_size
+                    h = scale / ar / cfg.max_size
                     if cfg.backbone.use_square_anchors:
                         h = w
 
                     prior_boxes += [x, y, w, h]
 
     return torch.Tensor(prior_boxes).view(-1, 4)
+
 
 
 def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, mask_alpha=0.45, fps_str=''):
@@ -473,8 +474,9 @@ def prep_metrics(ap_data, dets, img, gt, gt_masks, h, w, num_crowd, image_id, de
             scores = list(scores.cpu().numpy().astype(float))
             box_scores = scores
             mask_scores = scores
-        masks = masks.view(-1, h*w).cuda()
-        boxes = boxes.cuda()
+        masks = masks.view(-1, h * w).to(device)
+        boxes = boxes.to(device)
+
 
 
     if args.output_coco_json:
@@ -1166,6 +1168,9 @@ if __name__ == '__main__':
             prep_coco_cats()
         else:
             dataset = None        
+        
+        print(f"Using max_size = {cfg.max_size}")
+        print("pred_scales:", cfg.backbone.pred_scales)
 
         print('Loading model...', end='')
         net = Yolact()
@@ -1187,10 +1192,12 @@ if __name__ == '__main__':
         if args.quantize_calibrate:
             # Perform quantize calibration on the floating-point model
             print('Quantizing model')
-            cal_data = torch.randn(1, 3, 550, 550)
+            # cal_data = torch.randn(1, 3, 550, 550)
+            cal_data = torch.randn(1, 3, 224, 224)
             cal_data = cal_data.to(device)
             quantizer = torch_quantizer("calib", net, (cal_data), output_dir="quant_out", device=device)
             quant_model = quantizer.quant_model
+            # quant_model.eval()
             evaluate(quant_model, priors, dataset, is_quant=True)
             quantizer.export_quant_config()
         elif args.quantize_test:
@@ -1199,12 +1206,14 @@ if __name__ == '__main__':
 
             # Evaluate the quantized model
             print('Testing quantized model')
-            cal_data = torch.randn(1, 3, 550, 550)
+            # cal_data = torch.randn(1, 3, 550, 550)
+            cal_data = torch.randn(1, 3, 224, 224)            
             cal_data = cal_data.to(device)
             quantizer = torch_quantizer("test", net, (cal_data), output_dir="quant_out", device=device)
             quant_model = quantizer.quant_model
+            # quant_model.eval()
             evaluate(quant_model, priors, dataset, is_quant=True, quant_mode="test")
-            quantizer.export_xmodel(deploy_check=False, output_dir="quant_out")
+            quantizer.export_xmodel(deploy_check=True, output_dir="quant_out")
         else:   
             print('Evaluating floating-point model')
             evaluate(net, priors, dataset)
