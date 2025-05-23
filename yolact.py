@@ -1,20 +1,3 @@
-###
-### Modifications:
-###   Note - these modifications have only been tested with the yolact_resnet50_config
-###   1) Permanently Turn of JIT to support Vitis-AI quantization tools
-###   2) In the PredictionModule removed prior boxes (from network graph) and related code.  
-###      Prior box computation moved to eval.py
-###   3) In FPN network rewrite code to remove element-wise add with 0 valued constant
-###   4) In the FPN network converted non-integer scale factor upsample operations  
-###      to upsample by integer scale factor followed by average pooling layer to 
-###      effectively perform upsample by non-integer factor.  
-###   5) In the Prototype network (modification made in utils/functions.py) converted the 
-###      ReLU that followed the bilinear interpolation operation to torch.nn.Identity().  
-###      The ReLU following the interpolation layer was preventing the Vitis-AI compiler from 
-###      mapping the interpolation operation to the DPU and had no effect on results
-###   6) Remove detection code from the model & move to eval.py as a post-processing function
-###
-
 import torch, torchvision
 import torch.nn as nn
 import torch.nn.functional as F
@@ -39,10 +22,9 @@ from utils.functions import MovingAverage, make_net
 torch.cuda.current_device()
 
 # As of March 10, 2019, Pytorch DataParallel still doesn't support JIT Script Modules
-# TJS - Force JIT off to be compatible with Vitis-AI tools
-use_jit = False
+use_jit = torch.cuda.device_count() <= 1
 if not use_jit:
-    print('Turning off JIT.')
+    print('Multiple GPUs detected! Turning off JIT.')
 
 ScriptModuleWrapper = torch.jit.ScriptModule if use_jit else nn.Module
 script_method_wrapper = torch.jit.script_method if use_jit else lambda fn, _rcn=None: fn
@@ -58,6 +40,7 @@ class Concat(nn.Module):
     
     def forward(self, x):
         # Concat each along the channel dimension
+        # print("results", torch.cat([net(x) for net in self.nets], dim=1, **self.extra_params))
         return torch.cat([net(x) for net in self.nets], dim=1, **self.extra_params)
 
 prior_cache = defaultdict(lambda: None)
@@ -141,6 +124,13 @@ class PredictionModule(nn.Module):
             if cfg.mask_type == mask_type.lincomb and cfg.mask_proto_coeff_gate:
                 self.gate_layer = nn.Conv2d(out_channels, self.num_priors * self.mask_dim, kernel_size=3, padding=1)
 
+        self.aspect_ratios = aspect_ratios
+        self.scales = scales
+
+        self.priors = None
+        self.last_conv_size = None
+        self.last_img_size = None
+
     def forward(self, x):
         """
         Args:
@@ -158,7 +148,9 @@ class PredictionModule(nn.Module):
         
         conv_h = x.size(2)
         conv_w = x.size(3)
-        
+        # print("conv_h",conv_h)
+        # print("conv_w",conv_w)
+
         if cfg.extra_head_net is not None:
             x = src.upfeature(x)
         
@@ -179,7 +171,8 @@ class PredictionModule(nn.Module):
 
         bbox = src.bbox_layer(bbox_x).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, 4)
         conf = src.conf_layer(conf_x).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.num_classes)
-        
+        #print("conf",conf.shape)
+
         if cfg.eval_mask_branch:
             mask = src.mask_layer(mask_x).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.mask_dim)
         else:
@@ -197,29 +190,84 @@ class PredictionModule(nn.Module):
             bbox[:, :, 0] /= conv_w
             bbox[:, :, 1] /= conv_h
 
-#        if cfg.eval_mask_branch:
-#            if cfg.mask_type == mask_type.direct:
-#                mask = torch.sigmoid(mask)
-#            elif cfg.mask_type == mask_type.lincomb:
-#                mask = cfg.mask_proto_coeff_activation(mask)
-#
-#                if cfg.mask_proto_coeff_gate:
-#                    gate = src.gate_layer(x).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.mask_dim)
-#                    mask = mask * torch.sigmoid(gate)
-#
-#        if cfg.mask_proto_split_prototypes_by_head and cfg.mask_type == mask_type.lincomb:
-#            mask = F.pad(mask, (self.index * self.mask_dim, (self.num_heads - self.index - 1) * self.mask_dim), mode='constant', value=0)
+        if cfg.eval_mask_branch:
+            if cfg.mask_type == mask_type.direct:
+                mask = torch.sigmoid(mask)
+            elif cfg.mask_type == mask_type.lincomb:
+                mask = cfg.mask_proto_coeff_activation(mask)
+
+                if cfg.mask_proto_coeff_gate:
+                    gate = src.gate_layer(x).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.mask_dim)
+                    mask = mask * torch.sigmoid(gate)
+
+        if cfg.mask_proto_split_prototypes_by_head and cfg.mask_type == mask_type.lincomb:
+            mask = F.pad(mask, (self.index * self.mask_dim, (self.num_heads - self.index - 1) * self.mask_dim), mode='constant', value=0)
         
-        preds = { 'loc': bbox, 'conf': conf, 'mask': mask }
+        priors = self.make_priors(conv_h, conv_w, x.device)
+
+        preds = { 'loc': bbox, 'conf': conf, 'mask': mask, 'priors': priors }
+        # print("bbox (outputSize1):", bbox.shape)
+        # print("conf (outputSize2):", conf.shape)
+        # print("mask (outputSize3):", mask.shape)
 
         if cfg.use_mask_scoring:
-            preds['score'] = score
+            preds['scores'] = score
 
         if cfg.use_instance_coeff:
             preds['inst'] = inst
         
         return preds
+
+    def make_priors(self, conv_h, conv_w, device):
+        """ Note that priors are [x,y,width,height] where (x,y) is the center of the box. """
+        global prior_cache
+        size = (conv_h, conv_w)
+
+        with timer.env('makepriors'):
+            if self.last_img_size != (cfg._tmp_img_w, cfg._tmp_img_h):
+                prior_data = []
+
+                # Iteration order is important (it has to sync up with the convout)
+                for j, i in product(range(conv_h), range(conv_w)):
+                    # +0.5 because priors are in center-size notation
+                    x = (i + 0.5) / conv_w
+                    y = (j + 0.5) / conv_h
+                    
+                    for ars in self.aspect_ratios:
+                        for scale in self.scales:
+                            for ar in ars:
+                                if not cfg.backbone.preapply_sqrt:
+                                    ar = sqrt(ar)
+
+                                if cfg.backbone.use_pixel_scales:
+                                    w = scale * ar / cfg.max_size
+                                    h = scale / ar / cfg.max_size
+                                else:
+                                    w = scale * ar / conv_w
+                                    h = scale / ar / conv_h
+                                
+                                # This is for backward compatability with a bug where I made everything square by accident
+                                if cfg.backbone.use_square_anchors:
+                                    h = w
+
+                                prior_data += [x, y, w, h]
+
+                self.priors = torch.Tensor(prior_data, device=device).view(-1, 4).detach()
+                self.priors.requires_grad = False
+                self.last_img_size = (cfg._tmp_img_w, cfg._tmp_img_h)
+                self.last_conv_size = (conv_w, conv_h)
+                prior_cache[size] = None
+            elif self.priors.device != device:
+                # This whole weird situation is so that DataParalell doesn't copy the priors each iteration
+                if prior_cache[size] is None:
+                    prior_cache[size] = {}
+                
+                if device not in prior_cache[size]:
+                    prior_cache[size][device] = self.priors.to(device)
+
+                self.priors = prior_cache[size][device]
         
+        return self.priors
 
 class FPN(ScriptModuleWrapper):
     """
@@ -266,66 +314,91 @@ class FPN(ScriptModuleWrapper):
         self.relu_downsample_layers = cfg.fpn.relu_downsample_layers
         self.relu_pred_layers       = cfg.fpn.relu_pred_layers
 
-    @script_method_wrapper
-    def forward(self, convouts:List[torch.Tensor]):
-        """
-        Args:
-            - convouts (list): A list of convouts for the corresponding layers in in_channels.
-        Returns:
-            - A list of FPN convouts in the same order as x with extra downsample layers if requested.
-        """
+    # @script_method_wrapper
+    # def forward(self, convouts:List[torch.Tensor]):
+    #     """
+    #     Args:
+    #         - convouts (list): A list of convouts for the corresponding layers in in_channels.
+    #     Returns:
+    #         - A list of FPN convouts in the same order as x with extra downsample layers if requested.
+    #     """
 
+    #     out = []
+    #     x = torch.zeros(1, device=convouts[0].device)
+    #     for i in range(len(convouts)):
+    #         out.append(x)
+
+    #     # For backward compatability, the conv layers are stored in reverse but the input and output is
+    #     # given in the correct order. Thus, use j=-i-1 for the input and output and i for the conv layers.
+    #     j = len(convouts)
+    #     for lat_layer in self.lat_layers:
+    #         j -= 1
+
+    #         if j < len(convouts) - 1:
+    #             _, _, h, w = convouts[j].size()
+    #             x = F.interpolate(x, size=(h, w), mode=self.interpolation_mode, align_corners=False)
+            
+    #         x = x + lat_layer(convouts[j])
+    #         out[j] = x
+        
+    #     # This janky second loop is here because TorchScript.
+    #     j = len(convouts)
+    #     for pred_layer in self.pred_layers:
+    #         j -= 1
+    #         out[j] = pred_layer(out[j])
+
+    #         if self.relu_pred_layers:
+    #             F.relu(out[j], inplace=True)
+
+    #     cur_idx = len(out)
+
+    #     # In the original paper, this takes care of P6
+    #     if self.use_conv_downsample:
+    #         for downsample_layer in self.downsample_layers:
+    #             out.append(downsample_layer(out[-1]))
+    #     else:
+    #         for idx in range(self.num_downsample):
+    #             # Note: this is an untested alternative to out.append(out[-1][:, :, ::2, ::2]). Thanks TorchScript.
+    #             out.append(nn.functional.max_pool2d(out[-1], 1, stride=2))
+
+    #     if self.relu_downsample_layers:
+    #         for idx in range(len(out) - cur_idx):
+    #             out[idx] = F.relu(out[idx + cur_idx], inplace=False)
+
+    #     return out
+    @script_method_wrapper
+    def forward(self, convouts: List[torch.Tensor]):
         out = []
         x = torch.zeros(1, device=convouts[0].device)
         for i in range(len(convouts)):
             out.append(x)
-
-        # For backward compatability, the conv layers are stored in reverse but the input and output is
-        # given in the correct order. Thus, use j=-i-1 for the input and output and i for the conv layers.
+        # Lateral 합연산
         j = len(convouts)
         for lat_layer in self.lat_layers:
             j -= 1
-            
-            # TJS - modified this section of code to remove unnecessary element-wise add with constant 0,
-            #       and convert interpolate option to use scale factor of 2 instead of non-integer value.
-            #       The actual scale factors needed for the ResNet-50 backbone are 35/18 = 1.944, and 
-            #       69/35 = 1.971.  However, the Xilinx DPU only supports bilinear interpolation when
-            #       using scale factors of 2, 4, or 8.  Therefore, we first upsample by a factor of 2,
-            #       and then downsample using average pooling with stride=1 to get the desired output size.  
-            #       Example:
-            #          input size                  = 18x18
-            #          interpolate output size     = 36x36
-            #          average pooling output size = 35x35
-            #          output size                 = 35x35
             if j < len(convouts) - 1:
-                _, _, h, w = convouts[j].size()
-                x = F.interpolate(x, scale_factor=2, mode=self.interpolation_mode, align_corners=False)
-                x = F.avg_pool2d(x, 2, stride=1, padding=0)
-                y = lat_layer(convouts[j])
-                x = x + y
-            else:
-                x = lat_layer(convouts[j])
+                # 하위 특징 맵의 크기를 직접 사용하여 정확한 크기로 업샘플링
+                target_size = convouts[j].size()[-2:]  # (h, w)
+                x = F.interpolate(x, size=target_size, mode=self.interpolation_mode, align_corners=False)
             
+            x = x + lat_layer(convouts[j])
             out[j] = x
-        
-        # This janky second loop is here because TorchScript.
+
+        # Prediction conv
         j = len(convouts)
         for pred_layer in self.pred_layers:
             j -= 1
             out[j] = pred_layer(out[j])
-
             if self.relu_pred_layers:
                 F.relu(out[j], inplace=True)
 
+        # Downsample 추가
         cur_idx = len(out)
-
-        # In the original paper, this takes care of P6
         if self.use_conv_downsample:
             for downsample_layer in self.downsample_layers:
                 out.append(downsample_layer(out[-1]))
         else:
             for idx in range(self.num_downsample):
-                # Note: this is an untested alternative to out.append(out[-1][:, :, ::2, ::2]). Thanks TorchScript.
                 out.append(nn.functional.max_pool2d(out[-1], 1, stride=2))
 
         if self.relu_downsample_layers:
@@ -333,6 +406,7 @@ class FPN(ScriptModuleWrapper):
                 out[idx] = F.relu(out[idx + cur_idx], inplace=False)
 
         return out
+
 
 class FastMaskIoUNet(ScriptModuleWrapper):
 
@@ -372,7 +446,7 @@ class Yolact(nn.Module):
 
     def __init__(self):
         super().__init__()
-
+        
         self.backbone = construct_backbone(cfg.backbone)
 
         if cfg.freeze_bn:
@@ -439,6 +513,10 @@ class Yolact(nn.Module):
         
         if cfg.use_semantic_segmentation_loss:
             self.semantic_seg_conv = nn.Conv2d(src_channels[0], cfg.num_classes-1, kernel_size=1)
+
+        # For use in evaluation
+        self.detect = Detect(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k,
+            conf_thresh=cfg.nms_conf_thresh, nms_thresh=cfg.nms_thresh)
 
     def save_weights(self, path):
         """ Saves the model's weights using compression because the file sizes were getting too big. """
@@ -539,18 +617,26 @@ class Yolact(nn.Module):
         
         with timer.env('backbone'):
             outs = self.backbone(x)
+            #for i, out in enumerate(outs):
+            #    print(f"Tensor {i} size: {out.size()}")
 
         if cfg.fpn is not None:
             with timer.env('fpn'):
                 # Use backbone.selected_layers because we overwrote self.selected_layers
                 outs = [outs[i] for i in cfg.backbone.selected_layers]
+                #for i, out in enumerate(outs):
+                #    print(f"Layer {i} output shape: {out.shape}")
                 outs = self.fpn(outs)
+                
+                # 추가된 부분: FPN 레벨별 출력 모양 확인
+                #for i, out in enumerate(outs):
+                    #print(f"FPN Level {i+1} Output Shape: {out.shape}")
+
 
         proto_out = None
         if cfg.mask_type == mask_type.lincomb and cfg.eval_mask_branch:
             with timer.env('proto'):
                 proto_x = x if self.proto_src is None else outs[self.proto_src]
-                
                 if self.num_grids > 0:
                     grids = self.grid.repeat(proto_x.size(0), 1, 1, 1)
                     proto_x = torch.cat([proto_x, grids], dim=1)
@@ -572,10 +658,12 @@ class Yolact(nn.Module):
                     bias_shape = [x for x in proto_out.size()]
                     bias_shape[-1] = 1
                     proto_out = torch.cat([proto_out, torch.ones(*bias_shape)], -1)
+                    
+        #print("proto_out", proto_out)
 
 
         with timer.env('pred_heads'):
-            pred_outs = { 'loc': [], 'conf': [], 'mask': [] }
+            pred_outs = { 'loc': [], 'conf': [], 'mask': [], 'priors': [] }
 
             if cfg.use_mask_scoring:
                 pred_outs['score'] = []
@@ -585,7 +673,6 @@ class Yolact(nn.Module):
             
             for idx, pred_layer in zip(self.selected_layers, self.prediction_layers):
                 pred_x = outs[idx]
-
                 if cfg.mask_type == mask_type.lincomb and cfg.mask_proto_prototypes_as_features:
                     # Scale the prototypes down to the current prediction layer's size and add it as inputs
                     proto_downsampled = F.interpolate(proto_downsampled, size=outs[idx].size()[2:], mode='bilinear', align_corners=False)
@@ -600,16 +687,9 @@ class Yolact(nn.Module):
                 for k, v in p.items():
                     pred_outs[k].append(v)
 
-
         for k, v in pred_outs.items():
-            pred_outs[k] = torch.cat(v,dim=1)
+            pred_outs[k] = torch.cat(v, -2)
 
-        if cfg.eval_mask_branch:
-            if cfg.mask_type == mask_type.direct:
-                pred_outs['mask'] = torch.sigmoid(pred_outs['mask'])
-            elif cfg.mask_type == mask_type.lincomb:
-                pred_outs['mask'] = cfg.mask_proto_coeff_activation(pred_outs['mask'])
-        
         if proto_out is not None:
             pred_outs['proto'] = proto_out
 
@@ -621,6 +701,7 @@ class Yolact(nn.Module):
             if cfg.use_semantic_segmentation_loss:
                 pred_outs['segm'] = self.semantic_seg_conv(outs[0])
 
+            return pred_outs
         else:
             if cfg.use_mask_scoring:
                 pred_outs['score'] = torch.sigmoid(pred_outs['score'])
@@ -648,8 +729,8 @@ class Yolact(nn.Module):
                     
                 else:
                     pred_outs['conf'] = F.softmax(pred_outs['conf'], -1)
-        
-        return pred_outs
+
+            return self.detect(pred_outs, self)
 
 
 
@@ -675,6 +756,9 @@ if __name__ == '__main__':
 
     x = torch.zeros((1, 3, cfg.max_size, cfg.max_size))
     y = net(x)
+
+    for p in net.prediction_layers:
+        print(p.last_conv_size)
 
     print()
     for k, a in y.items():
