@@ -1,16 +1,4 @@
-## **This fork has been updated to work with Vitis-AI v2.0 & v2.5 tools**
-
-### High-level list of updates:
-- Prior box cacluation has been removed from yolact.py
-
-  **Note:** Prior box calculation has only been tested with the ResNet-50 backbone; prior box calculation for other backbones will most likely be incorrect.
-
-- Removed detection post-processing from yolact.py
-
-  **Note:** eval.py has not been tested with video inputs and probably does not work
-
-- Tweaked some of the model layers to be compatible with the Vitis-AI supported layers (managed to not need to re-train the modified model)
-
+## **This fork has been updated to work with Vitis-AI v2.0 & v2.5 tools & YOLACT_Vitis_ai**
 
 # **Y**ou **O**nly **L**ook **A**t **C**oefficien**T**s
 ```
@@ -27,6 +15,85 @@
     ██║  ██║╚██████╔╝   ██║   ╚██████╔╝██║ ╚═╝ ██║██║  ██║   ██║   ██║╚██████╔╝██║ ╚████║     ███████╗██║  ██║██████╔╝
     ╚═╝  ╚═╝ ╚═════╝    ╚═╝    ╚═════╝ ╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝     ╚══════╝╚═╝  ╚═╝╚═════╝
 ```
+
+# YOLACT Quantization & Deployment Guide (SKKU Edition)
+
+> ### 🧩 이 가이드는 사전 교육 영상 시청 이후 단계를 기반으로 작성되었습니다.
+> 아래 단계는 Docker 설정부터 Ultra96v2에 배포 가능한 `.xmodel` 생성까지 포함합니다.
+
+---
+
+### 1. Docker 환경 설정 및 WSL Ubuntu 진입
+```bash
+cd Vitis-AI
+./docker_run.sh
+conda activate vitis-ai-pytorch
+```
+
+---
+
+### 2. 레포지토리 클론 및 패키지 설치
+```bash
+git clone https://github.com/SKKUAutoLab/yolact_vitis_ai_SKKU.git
+cd yolact_vitis_ai_SKKU
+pip install -r requirements.txt
+```
+
+---
+
+### 3. 데이터셋 구성
+- `dataset/` 폴더를 생성 후, 학습용 이미지 데이터를 `train`, `valid`, `test`로 구성하여 해당 폴더로 이동합니다.
+
+---
+
+### 4. 데이터셋 경로 설정 확인
+- `data/config.py`에서 187번째 줄과 197번째 줄을 열어 본인의 데이터 경로가 올바르게 설정되었는지 확인합니다.
+
+---
+
+### 5. 양자화(calibration) 및 테스트(test) 수행
+
+#### ▪️ 양자화 보정 (Calibration)
+- 부동소수점 모델을 정수 양자화를 위해 조정하는 단계입니다.
+```bash
+python eval.py \
+  --trained_model=weights/<학습한_YOLACT_가중치.pth> \
+  --config=<사용한_Config_이름> \
+  --quantize_calibrate
+```
+
+#### ▪️ 양자화 테스트 (Test)
+- 보정된 모델을 테스트하여 정확도를 확인하고 `.xmodel` 파일을 생성합니다.
+```bash
+python eval.py \
+  --trained_model=weights/<학습한_YOLACT_가중치_interrupt.pth> \
+  --config=<사용한_Config_이름> \
+  --quantize_test
+```
+
+---
+
+### 6. DPU 호환 xmodel 컴파일
+- `quantize_test` 수행 후 `.xmodel`을 Ultra96v2 DPU에서 사용할 수 있도록 컴파일합니다.
+```bash
+vai_c_xir \
+  --xmodel quant_out/Yolact_int.xmodel \
+  --arch ultra96v2_arch.json \
+  --net_name yolact \
+  --output_dir compiled_yolact_model
+```
+
+---
+
+### 7. Jupyter 환경에서 모델 활용
+- `compiled_yolact_model` 폴더에 `.xmodel`이 생성된 것을 확인한 후, Jupyter 환경으로 이동하여 배포 및 테스트를 진행합니다.
+
+---
+
+필요 시 `weights/`, `quant_out/`, `compiled_yolact_model/` 폴더를 프로젝트 루트에서 명확하게 관리하세요.
+
+추가적으로 도움이 필요하시면, [SKKUAutoLab GitHub](https://github.com/SKKUAutoLab/)를 참고하시기 바랍니다.
+
 
 A simple, fully convolutional model for real-time instance segmentation. This is the code for our papers:
  - [YOLACT: Real-time Instance Segmentation](https://arxiv.org/abs/1904.02689)
