@@ -32,19 +32,23 @@ YOLACT Quantization & Deployment Guide (SKKU Edition)
 
 2 > 레포지토리 클론 & 패키지 설치
 > git clone https://github.com/SKKUAutoLab/yolact_vitis_ai_SKKU.git
+> 
 > cd yolact_vitis_ai_SKKU
+> 
 > pip install -r requirements.txt
 
 ━━━━━━━━━━━━━━━━━━━━━━━
 
 3 > 데이터셋 구성 (YOLACT 학습 시, 사용된 데이터 셋)
 > dataset/ 폴더 생성
+> 
 > 학습 이미지: train/, valid/, test/ 하위 폴더 구성
 
 ━━━━━━━━━━━━━━━━━━━━━━━
 
 4 > 데이터셋 경로 설정 확인
 > data/config.py
+> 
 > 187번 줄, 197번 줄의 경로 확인 및 수정
 
 ━━━━━━━━━━━━━━━━━━━━━━━
@@ -55,7 +59,7 @@ YOLACT Quantization & Deployment Guide (SKKU Edition)
 >   --trained_model=weights/<YOLACT_가중치.pth> \
 >   --config=<Config_이름> \
 >   --quantize_calibrate
-
+> 
 ▪️ 양자화 테스트 (Test) - 보정된 모델을 테스트하여 정확도를 확인하고 .xmodel 파일을 생성
 > python eval.py \
 >   --trained_model=weights/<YOLACT_가중치_interrupt.pth> \
