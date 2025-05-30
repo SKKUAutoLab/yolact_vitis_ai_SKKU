@@ -1192,7 +1192,7 @@ if __name__ == '__main__':
         if args.quantize_calibrate:
             # Perform quantize calibration on the floating-point model
             print('Quantizing model')
-            # cal_data = torch.randn(1, 3, 550, 550)
+            #cal_data = torch.randn(1, 3, 550, 550)
             cal_data = torch.randn(1, 3, 224, 224)
             cal_data = cal_data.to(device)
             quantizer = torch_quantizer("calib", net, (cal_data), output_dir="quant_out", device=device)
@@ -1206,7 +1206,7 @@ if __name__ == '__main__':
 
             # Evaluate the quantized model
             print('Testing quantized model')
-            # cal_data = torch.randn(1, 3, 550, 550)
+            #cal_data = torch.randn(1, 3, 550, 550)
             cal_data = torch.randn(1, 3, 224, 224)            
             cal_data = cal_data.to(device)
             quantizer = torch_quantizer("test", net, (cal_data), output_dir="quant_out", device=device)
