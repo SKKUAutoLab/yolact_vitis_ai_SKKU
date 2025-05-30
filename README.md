@@ -16,7 +16,7 @@
     ╚═╝  ╚═╝ ╚═════╝    ╚═╝    ╚═════╝ ╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝     ╚══════╝╚═╝  ╚═╝╚═════╝
 ```
 
-YOLACT Quantization & Deployment Guide (SKKU Edition)
+## YOLACT Quantization & Deployment Guide (SKKU Edition)
 > ## 이 가이드는 사전 교육 영상 시청 이후 단계를 기반으로 작성되었습니다.
 
 ━━━━━━━━━━━━━━━━━━━━━━━
