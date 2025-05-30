@@ -18,68 +18,52 @@
 
 YOLACT Quantization & Deployment Guide (SKKU Edition)
 > 이 가이드는 사전 교육 영상 시청 이후 단계를 기반으로 작성되었습니다.
-
 ━━━━━━━━━━━━━━━━━━━━━━━
-
 1 > Docker 환경 설정 & WSL Ubuntu 진입
 > cd Vitis-AI
 > ./docker_run.sh
 > conda activate vitis-ai-pytorch
-
 ━━━━━━━━━━━━━━━━━━━━━━━
-
 2 > 레포지토리 클론 & 패키지 설치
 > git clone https://github.com/SKKUAutoLab/yolact_vitis_ai_SKKU.git
 > cd yolact_vitis_ai_SKKU
 > pip install -r requirements.txt
-
 ━━━━━━━━━━━━━━━━━━━━━━━
 
 3 > 데이터셋 구성 (YOLACT 학습 시, 사용된 데이터 셋)
 > dataset/ 폴더 생성
 > 학습 이미지: train/, valid/, test/ 하위 폴더 구성
-
 ━━━━━━━━━━━━━━━━━━━━━━━
-
 4 > 데이터셋 경로 설정 확인
 > data/config.py
 > 187번 줄, 197번 줄의 경로 확인 및 수정
-
 ━━━━━━━━━━━━━━━━━━━━━━━
-
 5 > 양자화(calibration) & 테스트(test) 수행
 ▪️ 양자화 보정 (Calibration) - 부동소수점 모델을 정수 양자화를 위해 조정하는 단계
 > python eval.py \
 >   --trained_model=weights/<YOLACT_가중치.pth> \
 >   --config=<Config_이름> \
 >   --quantize_calibrate
-
 ▪️ 양자화 테스트 (Test) - 보정된 모델을 테스트하여 정확도를 확인하고 .xmodel 파일을 생성
 > python eval.py \
 >   --trained_model=weights/<YOLACT_가중치_interrupt.pth> \
 >   --config=<Config_이름> \
 >   --quantize_test
-
 ━━━━━━━━━━━━━━━━━━━━━━━
-
 6 > B1600 DPU용 xmodel 컴파일
 > vai_c_xir \
 >   --xmodel quant_out/Yolact_int.xmodel \
 >   --arch ultra96v2_arch.json \
 >   --net_name yolact \
 >   --output_dir compiled_yolact_model
-
 ━━━━━━━━━━━━━━━━━━━━━━━
-
 7 > Jupyter 환경에서 테스트
 > compiled_yolact_model 폴더 내 .xmodel 확인
 > Jupyter에서 배포 및 테스트 수행
-
 ━━━━━━━━━━━━━━━━━━━━━━━
-
 Tip
 > 추가 도움: 질문 게시판을 활용해주세요
-
+━━━━━━━━━━━━━━━━━━━━━━━
 
 
 A simple, fully convolutional model for real-time instance segmentation. This is the code for our papers:
