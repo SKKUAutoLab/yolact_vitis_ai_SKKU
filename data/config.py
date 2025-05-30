@@ -183,48 +183,14 @@ pascal_sbd_dataset = dataset_base.copy({
 #   'label_map': {1: 1}
 # })
 
-############################## Lane dataset v1 ################################################
-Lane_dataset = dataset_base.copy({
-  'name': 'Custom Lane Segmentation',
-  'train_info': '/media/joseph/Joseph/1104/640_480_custom_lane/train/_annotations.coco.json',
-  'train_images': '/media/joseph/Joseph/1104/640_480_custom_lane/train/',
-  'valid_info': '/media/joseph/Joseph/1104/640_480_custom_lane/valid/_annotations.coco.json',
-  'valid_images': '/media/joseph/Joseph/1104/640_480_custom_lane/valid/',
-  'class_names': ('2nd_Lane',),
-  'label_map': {1: 1}
-})
-################################################################################################
 
-############################## Lane dataset v2 ################################################
-Lane_datasetv2 = dataset_base.copy({
-  'name': 'Custom Lane Segmentationv2',
-  'train_info': '/media/joseph/Joseph/1104/cutom_lane_add_more_curve/train/_annotations.coco.json',
-  'train_images': '/media/joseph/Joseph/1104/cutom_lane_add_more_curve/train/',
-  'valid_info': '/media/joseph/Joseph/1104/cutom_lane_add_more_curve/valid/_annotations.coco.json',
-  'valid_images': '/media/joseph/Joseph/1104/cutom_lane_add_more_curve/valid/',
-  'class_names': ('2nd_Lane',),
-  'label_map': {1: 1}
-})
-################################################################################################
-
-# ############################## Lane dataset v3 256 x 256 #######################################
-# Lane_datasetv3 = dataset_base.copy({
-#   'name': 'Custom Lane Segmentationv3',
-#   'train_info': '/media/joseph/Joseph/1104/0521_dataset/train/_annotations.coco.json',
-#   'train_images': '/media/joseph/Joseph/1104/0521_dataset/train/',
-#   'valid_info': '/media/joseph/Joseph/1104/0521_dataset/_annotations.coco.json',
-#   'valid_images': '/media/joseph/Joseph/1104/0521_dataset/valid/',
-#   'class_names': ('2nd_Lane',),
-#   'label_map': {1: 1}
-# })
-# ################################################################################################
 ############################## Lane dataset v3 256 x 256 #######################################
 Lane_datasetv3 = dataset_base.copy({
   'name': 'Custom Lane Segmentationv3',
-  'train_info': 'I:/1104/0521_dataset/train/_annotations.coco.json',
-  'train_images': 'I:/1104/0521_dataset/train/',
-  'valid_info': 'I:/1104/0521_dataset/valid/_annotations.coco.json',
-  'valid_images': 'I:/1104/0521_dataset/valid/',
+  'train_info': '/workspace/yolact_vitis_ai/dataset/train/_annotations.coco.json',
+  'train_images': '/workspace/yolact_vitis_ai/dataset/train/',
+  'valid_info': '/workspace/yolact_vitis_ai/dataset/valid/_annotations.coco.json',
+  'valid_images': '/workspace/yolact_vitis_ai/dataset/valid/',
   'class_names': ('2nd_Lane',),
   'label_map': {1: 1}
 })
@@ -352,7 +318,7 @@ vgg16_backbone = backbone_base.copy({
     'pred_aspect_ratios': [ [[1], [1, sqrt(2), 1/sqrt(2), sqrt(3), 1/sqrt(3)][:n]] for n in [3, 5, 5, 5, 3, 3] ],
 })
 
-##### Automationlab ############## 
+######################## Mobilnetv2 BackBone ##################################
 
 mobilenetv2_backbone = resnet50_backbone.copy({
     'name': 'MobileNetV2_Backbone',
@@ -366,7 +332,7 @@ mobilenetv2_backbone = resnet50_backbone.copy({
     'pred_aspect_ratios': [ [[1, 1/2, 2]] ]*5,     ###[[[1.414]]] * 5,
     'use_pixel_scales': False,
 })
-
+######################################################################
 
 
 # ----------------------- MASK BRANCH TYPES ----------------------- #
@@ -774,6 +740,21 @@ yolact_base_config = coco_base_config.copy({
     'use_semantic_segmentation_loss': True,
 })
 
+yolact_resnet101_config = yolact_base_config.copy({ 
+    'name': 'yolact_resnet101',
+
+    'backbone': resnet101_backbone.copy({ # using ResNet101 (can change)
+        'selected_layers': list(range(1, 4)),
+
+        'pred_scales': yolact_base_config.backbone.pred_scales,
+        'pred_aspect_ratios': yolact_base_config.backbone.pred_aspect_ratios,
+        'use_pixel_scales': False,
+        'preapply_sqrt': False,
+        'use_square_anchors': False,  # This is for backward compatability with a bug
+    }),
+})
+
+
 yolact_im224_config = yolact_base_config.copy({
     'name': 'yolact_im224',
 
@@ -829,6 +810,19 @@ yolact_resnet50_config = yolact_base_config.copy({
         'use_square_anchors': True, # This is for backward compatability with a bug
     }),
 })
+yolact_resnet50_config = yolact_base_config.copy({
+    'name': 'yolact_resnet50',
+
+    'backbone': resnet50_backbone.copy({
+        'selected_layers': list(range(1, 4)),
+        
+        'pred_scales': yolact_base_config.backbone.pred_scales,
+        'pred_aspect_ratios': yolact_base_config.backbone.pred_aspect_ratios,
+        'use_pixel_scales': True,
+        'preapply_sqrt': False,
+        'use_square_anchors': True, # This is for backward compatability with a bug
+    }),
+})
 
 yolact_resnet50_im224_config = yolact_im224_config.copy({
     'name': 'yolact_resnet50',
@@ -860,29 +854,9 @@ yolact_resnet50_pascal_config = yolact_resnet50_config.copy({
         'use_square_anchors': False,
     })
 })
-############################# custom lane v1 #############################
-yolact_resnet50_custom_lane_config = yolact_resnet50_config.copy({
-    'name': 'yolact_resnet50_custom_lane',
-    # Dataset stuff
-    'dataset': Lane_dataset,
-    'num_classes': len(Lane_dataset.class_names) + 1,
 
-    # Image Size
-    #'max_size': 640,
-})
-###########################################################################
 
-############################# custom lane v2 #############################
-yolact_resnet50_custom_lane_configv2 = yolact_resnet50_config.copy({
-    'name': 'yolact_resnet50_custom_lane',
-    # Dataset stuff
-    'dataset': Lane_datasetv3,
-    'num_classes': len(Lane_dataset.class_names) + 1,
 
-    # Image Size
-    'max_size': 400,
-})
-###########################################################################
 
 ############################# custom lane mobilenet #############################
 yolact_mobilenetv2_custom_lane_config = yolact_resnet50_config.copy({
@@ -910,8 +884,6 @@ yolact_mobilenetv2_custom_lane_im224_config = yolact_resnet50_im224_config.copy(
     #'max_size': 224,
 })
 ###########################################################################
-
-
 
 # ----------------------- YOLACT++ CONFIGS ----------------------- #
 
