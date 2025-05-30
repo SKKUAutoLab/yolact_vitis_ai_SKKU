@@ -23,7 +23,9 @@ YOLACT Quantization & Deployment Guide (SKKU Edition)
 
 1 > Docker 환경 설정 & WSL Ubuntu 진입
 > cd Vitis-AI
+> 
 > ./docker_run.sh
+> 
 > conda activate vitis-ai-pytorch
 
 ━━━━━━━━━━━━━━━━━━━━━━━
