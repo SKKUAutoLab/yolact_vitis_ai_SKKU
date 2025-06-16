@@ -83,10 +83,6 @@
 
 ━━━━━━━━━━━━━━━━━━━━━━━
 
-Tip
-> 추가 도움: 질문 게시판을 활용해주세요
-
-━━━━━━━━━━━━━━━━━━━━━━━
 
 
 A simple, fully convolutional model for real-time instance segmentation. This is the code for our papers:
